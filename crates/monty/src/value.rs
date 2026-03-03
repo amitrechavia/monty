@@ -16,6 +16,7 @@ use num_traits::{ToPrimitive, Zero};
 use crate::{
     asyncio::CallId,
     builtins::Builtins,
+    bytecode::VM,
     exception_private::{ExcType, RunError, RunResult, SimpleException},
     heap::{ContainsHeap, Heap, HeapData, HeapId},
     heap_data::HeapDataMut,
@@ -327,7 +328,7 @@ impl PyTrait for Value {
         }
     }
 
-    fn py_bool(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> bool {
+    fn py_bool(&self, vm: &VM<'_, '_, impl ResourceTracker>) -> bool {
         match self {
             Self::Undefined => false,
             Self::Ellipsis => true,
@@ -342,9 +343,9 @@ impl PyTrait for Value {
             Self::Marker(_) => true,                            // Markers are always truthy
             Self::Property(_) => true,                          // Properties are always truthy
             Self::ExternalFuture(_) => true,                    // ExternalFutures are always truthy
-            Self::InternString(string_id) => !interns.get_str(*string_id).is_empty(),
-            Self::InternBytes(bytes_id) => !interns.get_bytes(*bytes_id).is_empty(),
-            Self::Ref(id) => heap.get(*id).py_bool(heap, interns),
+            Self::InternString(string_id) => !vm.interns.get_str(*string_id).is_empty(),
+            Self::InternBytes(bytes_id) => !vm.interns.get_bytes(*bytes_id).is_empty(),
+            Self::Ref(id) => vm.heap.get(*id).py_bool(vm),
             #[cfg(feature = "ref-count-panic")]
             Self::Dereferenced => panic!("Cannot access Dereferenced object"),
         }

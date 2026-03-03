@@ -150,10 +150,8 @@ pub trait PyTrait {
     /// Returns the truthiness of the value following Python semantics.
     ///
     /// Container types should typically report `false` when empty.
-    ///
-    /// The `interns` parameter provides access to interned string content.
-    fn py_bool(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> bool {
-        self.py_len(heap, interns) != Some(0)
+    fn py_bool(&self, vm: &VM<'_, '_, impl ResourceTracker>) -> bool {
+        self.py_len(vm.heap, vm.interns) != Some(0)
     }
 
     /// Writes the Python `repr()` string for this value to a formatter.

@@ -201,7 +201,7 @@ impl PyTrait for Slice {
         Ok(self.start == other.start && self.stop == other.stop && self.step == other.step)
     }
 
-    fn py_bool(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> bool {
+    fn py_bool(&self, _vm: &VM<'_, '_, impl ResourceTracker>) -> bool {
         // Slices are always truthy in Python
         true
     }

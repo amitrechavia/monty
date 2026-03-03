@@ -902,7 +902,7 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
                 // Unary Operations
                 Opcode::UnaryNot => {
                     let value = self.pop();
-                    let result = !value.py_bool(self.heap, self.interns);
+                    let result = !value.py_bool(self);
                     value.drop_with_heap(self);
                     self.push(Value::Bool(result));
                 }
@@ -1116,7 +1116,7 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
                 Opcode::JumpIfTrue => {
                     let offset = fetch_i16!(cached_frame);
                     let cond = self.pop();
-                    if cond.py_bool(self.heap, self.interns) {
+                    if cond.py_bool(self) {
                         jump_relative!(cached_frame.ip, offset);
                     }
                     cond.drop_with_heap(self);
@@ -1124,14 +1124,14 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
                 Opcode::JumpIfFalse => {
                     let offset = fetch_i16!(cached_frame);
                     let cond = self.pop();
-                    if !cond.py_bool(self.heap, self.interns) {
+                    if !cond.py_bool(self) {
                         jump_relative!(cached_frame.ip, offset);
                     }
                     cond.drop_with_heap(self);
                 }
                 Opcode::JumpIfTrueOrPop => {
                     let offset = fetch_i16!(cached_frame);
-                    if self.peek().py_bool(self.heap, self.interns) {
+                    if self.peek().py_bool(self) {
                         jump_relative!(cached_frame.ip, offset);
                     } else {
                         let value = self.pop();
@@ -1140,7 +1140,7 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
                 }
                 Opcode::JumpIfFalseOrPop => {
                     let offset = fetch_i16!(cached_frame);
-                    if self.peek().py_bool(self.heap, self.interns) {
+                    if self.peek().py_bool(self) {
                         let value = self.pop();
                         value.drop_with_heap(self);
                     } else {

@@ -299,7 +299,7 @@ impl PyTrait for Bytes {
         // No-op: bytes don't hold Value references
     }
 
-    fn py_bool(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> bool {
+    fn py_bool(&self, _vm: &VM<'_, '_, impl ResourceTracker>) -> bool {
         !self.0.is_empty()
     }
 
@@ -433,7 +433,7 @@ fn call_bytes_method_impl(
         // Split methods
         StaticStrings::Split => bytes_split(bytes, args, heap, interns),
         StaticStrings::Rsplit => bytes_rsplit(bytes, args, heap, interns),
-        StaticStrings::Splitlines => bytes_splitlines(bytes, args, heap, interns),
+        StaticStrings::Splitlines => bytes_splitlines(bytes, args, vm),
         StaticStrings::Partition => bytes_partition(bytes, args, heap, interns),
         StaticStrings::Rpartition => bytes_rpartition(bytes, args, heap, interns),
         // Replace/padding methods
@@ -1583,13 +1583,9 @@ fn bytes_rsplitn_whitespace(bytes: &[u8], maxsplit: usize) -> Vec<&[u8]> {
 /// Implements Python's `bytes.splitlines([keepends])` method.
 ///
 /// Returns a list of the lines in the bytes, breaking at line boundaries.
-fn bytes_splitlines(
-    bytes: &[u8],
-    args: ArgValues,
-    heap: &mut Heap<impl ResourceTracker>,
-    interns: &Interns,
-) -> RunResult<Value> {
-    let keepends = parse_bytes_splitlines_args(args, heap, interns)?;
+fn bytes_splitlines(bytes: &[u8], args: ArgValues, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Value> {
+    let keepends = parse_bytes_splitlines_args(args, vm)?;
+    let heap = &mut *vm.heap;
 
     let mut lines = Vec::new();
     let mut start = 0;
@@ -1638,18 +1634,14 @@ fn bytes_splitlines(
 }
 
 /// Parses arguments for bytes.splitlines method.
-fn parse_bytes_splitlines_args(
-    args: ArgValues,
-    heap: &mut Heap<impl ResourceTracker>,
-    interns: &Interns,
-) -> RunResult<bool> {
+fn parse_bytes_splitlines_args(args: ArgValues, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<bool> {
     let (pos_iter, kwargs) = args.into_parts();
-    defer_drop_mut!(pos_iter, heap);
+    defer_drop_mut!(pos_iter, vm);
     let kwargs = kwargs.into_iter();
-    defer_drop_mut!(kwargs, heap);
+    defer_drop_mut!(kwargs, vm);
 
     let keepends_value = pos_iter.next();
-    defer_drop_mut!(keepends_value, heap);
+    defer_drop_mut!(keepends_value, vm);
 
     // Check no extra positional arguments
     if pos_iter.len() != 0 {
@@ -1658,17 +1650,17 @@ fn parse_bytes_splitlines_args(
 
     // Process kwargs
     for (key, value) in kwargs {
-        defer_drop!(key, heap);
-        let mut value_guard = HeapGuard::new(value, heap);
+        defer_drop!(key, vm);
+        let mut value_guard = HeapGuard::new(value, vm);
 
-        let Some(keyword_name) = key.as_either_str(value_guard.heap()) else {
+        let Some(keyword_name) = key.as_either_str(value_guard.heap().heap) else {
             return Err(ExcType::type_error("keywords must be strings"));
         };
 
-        let key_str = keyword_name.as_str(interns);
+        let key_str = keyword_name.as_str(value_guard.heap().interns);
         if key_str == "keepends" {
             if let Some(previous_value) = keepends_value.replace(value_guard.into_inner()) {
-                previous_value.drop_with_heap(heap);
+                previous_value.drop_with_heap(vm);
                 return Err(ExcType::type_error(
                     "bytes.splitlines() got multiple values for argument 'keepends'",
                 ));
@@ -1682,7 +1674,7 @@ fn parse_bytes_splitlines_args(
 
     // Extract keepends (default false)
     let keepends = if let Some(v) = keepends_value {
-        v.py_bool(heap, interns)
+        v.py_bool(vm)
     } else {
         false
     };

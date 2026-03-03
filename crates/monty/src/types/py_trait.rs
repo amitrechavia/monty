@@ -235,12 +235,10 @@ pub trait PyTrait {
     /// The `interns` parameter provides access to interned string content for InternString/InternBytes.
     fn py_iadd(
         &mut self,
-        other: Value,
-        vm: &mut VM<'_, '_, impl ResourceTracker>,
+        _other: &Value,
+        _vm: &mut VM<'_, '_, impl ResourceTracker>,
         _self_id: Option<HeapId>,
     ) -> Result<bool, ResourceError> {
-        // Drop other if it's a Ref (ensure proper refcounting for unsupported types)
-        other.drop_with_heap(vm);
         Ok(false)
     }
 

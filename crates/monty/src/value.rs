@@ -644,7 +644,7 @@ impl PyTrait for Value {
 
     fn py_iadd(
         &mut self,
-        other: Self,
+        other: &Self,
         vm: &mut VM<'_, '_, impl ResourceTracker>,
         _self_id: Option<HeapId>,
     ) -> Result<bool, crate::resource::ResourceError> {
@@ -678,17 +678,7 @@ impl PyTrait for Value {
                 } else {
                     false
                 };
-                // Drop the other value - we've consumed it
-                other.drop_with_heap(heap);
                 Ok(result)
-            }
-            (Self::Ref(id1), Self::InternString(string_id)) => {
-                if let HeapDataMut::Str(s1) = heap.get_mut(*id1) {
-                    s1.as_string_mut().push_str(interns.get_str(*string_id));
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
             }
             // same for bytes
             (Self::InternBytes(b1), Self::InternBytes(b2)) => {
@@ -711,26 +701,12 @@ impl PyTrait for Value {
                 } else {
                     false
                 };
-                // Drop the other value - we've consumed it
-                other.drop_with_heap(heap);
                 Ok(result)
-            }
-            (Self::Ref(id1), Self::InternBytes(bytes_id)) => {
-                if let HeapDataMut::Bytes(b1) = heap.get_mut(*id1) {
-                    b1.as_vec_mut().extend_from_slice(interns.get_bytes(*bytes_id));
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
             }
             (Self::Ref(id), Self::Ref(_)) => {
                 Heap::with_entry_mut(vm, *id, |vm, mut data| data.py_iadd(other, vm, Some(*id)))
             }
-            _ => {
-                // Drop other if it's a Ref (ensure proper refcounting for unsupported type combinations)
-                other.drop_with_heap(heap);
-                Ok(false)
-            }
+            _ => Ok(false),
         }
     }
 

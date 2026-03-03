@@ -612,7 +612,7 @@ impl PyTrait for HeapDataMut<'_> {
 
     fn py_iadd(
         &mut self,
-        other: Value,
+        other: &Value,
         vm: &mut VM<'_, '_, impl ResourceTracker>,
         self_id: Option<HeapId>,
     ) -> Result<bool, crate::resource::ResourceError> {
@@ -622,11 +622,7 @@ impl PyTrait for HeapDataMut<'_> {
             Self::List(l) => l.py_iadd(other, vm, self_id),
             Self::Tuple(t) => t.py_iadd(other, vm, self_id),
             Self::Dict(d) => d.py_iadd(other, vm, self_id),
-            _ => {
-                // Drop other if it's a Ref (ensure proper refcounting for unsupported types)
-                other.drop_with_heap(vm);
-                Ok(false)
-            }
+            _ => Ok(false),
         }
     }
 

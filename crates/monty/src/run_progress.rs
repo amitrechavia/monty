@@ -320,9 +320,21 @@ impl<T: ResourceTracker> NameLookup<T> {
         // borrows heap/namespaces mutably and we need direct access for caching.
         let resolved_value = match result.into() {
             NameLookupResult::Value(obj) => {
-                let value = obj
-                    .to_value(&mut self.snapshot.heap, &self.snapshot.executor.interns)
-                    .map_err(|e| MontyException::runtime_error(format!("invalid name lookup result: {e}")))?;
+                // Create temporary VM for to_value conversion (needs &mut VM for Dict/Set hashing)
+                let value = {
+                    let mut print_tmp = PrintWriter::Disabled;
+                    let mut vm = VM::new(
+                        &mut self.snapshot.heap,
+                        &mut self.snapshot.namespaces,
+                        &self.snapshot.executor.interns,
+                        &mut print_tmp,
+                    );
+                    let v = obj
+                        .to_value(&mut vm)
+                        .map_err(|e| MontyException::runtime_error(format!("invalid name lookup result: {e}")))?;
+                    vm.cleanup();
+                    v
+                };
 
                 // Cache the resolved value in the appropriate namespace slot.
                 let ns_slot = NamespaceId::new(self.namespace_slot as usize);
@@ -656,7 +668,6 @@ impl From<MontyException> for ExtFunctionResult {
 ///
 /// This is used by both `Snapshot::run()` and `ResolveFutures::resume()` to
 /// convert raw VM results into typed progress values.
-#[cfg_attr(not(feature = "ref-count-panic"), expect(unused_mut))]
 pub(crate) fn handle_vm_result<T: ResourceTracker>(
     result: RunResult<FrameExit>,
     vm_state: Option<VMSnapshot>,
@@ -680,7 +691,14 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
             #[cfg(feature = "ref-count-panic")]
             namespaces.drop_global_with_heap(&mut heap);
 
-            let obj = MontyObject::new(value, &mut heap, &executor.interns);
+            // Create temporary VM for MontyObject conversion (needs &mut VM)
+            let obj = {
+                let mut print = PrintWriter::Disabled;
+                let mut vm = VM::new(&mut heap, &mut namespaces, &executor.interns, &mut print);
+                let o = MontyObject::new(value, &mut vm);
+                vm.cleanup();
+                o
+            };
             Ok(RunProgress::Complete(obj))
         }
         Ok(FrameExit::ExternalCall {
@@ -690,7 +708,14 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
             ..
         }) => {
             let function_name = function_name.into_string(&executor.interns);
-            let (args_py, kwargs_py) = args.into_py_objects(&mut heap, &executor.interns);
+            // Create temporary VM for args conversion (needs &mut VM)
+            let (args_py, kwargs_py) = {
+                let mut print = PrintWriter::Disabled;
+                let mut vm = VM::new(&mut heap, &mut namespaces, &executor.interns, &mut print);
+                let result = args.into_py_objects(&mut vm);
+                vm.cleanup();
+                result
+            };
 
             Ok(RunProgress::FunctionCall(FunctionCall::new(
                 function_name,
@@ -706,7 +731,14 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
             args,
             call_id,
         }) => {
-            let (args_py, kwargs_py) = args.into_py_objects(&mut heap, &executor.interns);
+            // Create temporary VM for args conversion (needs &mut VM)
+            let (args_py, kwargs_py) = {
+                let mut print = PrintWriter::Disabled;
+                let mut vm = VM::new(&mut heap, &mut namespaces, &executor.interns, &mut print);
+                let result = args.into_py_objects(&mut vm);
+                vm.cleanup();
+                result
+            };
 
             Ok(RunProgress::OsCall(OsCall::new(
                 function,
@@ -722,7 +754,14 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
             call_id,
         }) => {
             let function_name = method_name.into_string(&executor.interns);
-            let (args_py, kwargs_py) = args.into_py_objects(&mut heap, &executor.interns);
+            // Create temporary VM for args conversion (needs &mut VM)
+            let (args_py, kwargs_py) = {
+                let mut print = PrintWriter::Disabled;
+                let mut vm = VM::new(&mut heap, &mut namespaces, &executor.interns, &mut print);
+                let result = args.into_py_objects(&mut vm);
+                vm.cleanup();
+                result
+            };
 
             Ok(RunProgress::FunctionCall(FunctionCall::new(
                 function_name,

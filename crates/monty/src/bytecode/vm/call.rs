@@ -665,8 +665,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         let (namespace, this) = namespace_guard.as_parts_mut();
 
         // 2. Bind arguments to parameters
-        func.signature
-            .bind(args, defaults, this.heap, this.interns, func.name, namespace)?;
+        func.signature.bind(args, defaults, this, func.name, namespace)?;
 
         // Track created cell HeapIds for the coroutine
         let mut frame_cells: Vec<HeapId> = Vec::with_capacity(func.cell_var_count + cells.len());
@@ -726,18 +725,18 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         // Get function info (interns is a shared reference so no conflict)
         let func = self.interns.get_function(func_id);
 
-        // 1. Create new namespace for function
-        let namespace_idx = self.namespaces.new_namespace(func.namespace_size, self.heap)?;
+        // 1. Build namespace in a local Vec to avoid borrow conflict between
+        // self.namespaces and passing self (the VM) to bind()
+        let mut namespace = Vec::with_capacity(func.namespace_size);
 
-        let namespace = self.namespaces.get_mut(namespace_idx).mut_vec();
         // 2. Bind arguments to parameters
         {
-            let bind_result = func
-                .signature
-                .bind(args, &defaults, self.heap, self.interns, func.name, namespace);
+            let bind_result = func.signature.bind(args, &defaults, self, func.name, &mut namespace);
 
             if let Err(e) = bind_result {
-                self.namespaces.drop_with_heap(namespace_idx, self.heap);
+                for value in namespace {
+                    value.drop_with_heap(self);
+                }
                 for default in defaults {
                     default.drop_with_heap(self);
                 }
@@ -783,8 +782,11 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             namespace.resize_with(func.namespace_size, || Value::Undefined);
         }
 
-        let code = &func.code;
-        // 6. Push new frame
+        // 6. Register the pre-built namespace
+        let namespace_idx = self.namespaces.register_prebuilt(namespace, self.heap)?;
+
+        let code = &self.interns.get_function(func_id).code;
+        // 7. Push new frame
         self.push_frame(CallFrame::new_function(
             code,
             self.stack.len(),

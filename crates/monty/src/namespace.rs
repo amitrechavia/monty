@@ -32,10 +32,6 @@ pub(crate) const GLOBAL_NS_IDX: NamespaceId = NamespaceId(0);
 pub(crate) struct Namespace(Vec<Value>);
 
 impl Namespace {
-    fn with_capacity(capacity: usize) -> Self {
-        Self(Vec::with_capacity(capacity))
-    }
-
     pub fn get(&self, index: NamespaceId) -> &Value {
         &self.0[index.index()]
     }
@@ -146,31 +142,6 @@ impl Namespaces {
     /// 2. Tracks namespace memory usage through the heap's `ResourceTracker`
     ///
     /// # Arguments
-    /// * `namespace_size` - Expected number of values in the namespace
-    /// * `heap` - The heap, used to access the resource tracker for memory accounting
-    ///
-    /// # Returns
-    /// * `Ok(NamespaceId)` - Index of the new namespace
-    /// * `Err(ResourceError::Recursion)` - If adding this namespace would exceed recursion limit
-    /// * `Err(ResourceError::Memory)` - If adding this namespace would exceed memory limits
-    pub fn new_namespace(
-        &mut self,
-        namespace_size: usize,
-        heap: &mut Heap<impl ResourceTracker>,
-    ) -> Result<NamespaceId, ResourceError> {
-        // Track the memory used by this namespace's slots
-        let size = namespace_size * std::mem::size_of::<Value>();
-        heap.tracker_mut().on_allocate(|| size)?;
-
-        if let Some(reuse_id) = self.reuse_ids.pop() {
-            Ok(reuse_id)
-        } else {
-            let idx = NamespaceId::new(self.stack.len());
-            self.stack.push(Namespace::with_capacity(namespace_size));
-            Ok(idx)
-        }
-    }
-
     /// Registers a pre-built namespace (e.g., from a coroutine) with memory and recursion tracking.
     ///
     /// This is similar to `new_namespace` but takes an already-populated `Vec<Value>` instead
@@ -232,8 +203,9 @@ impl Namespaces {
     /// Call this before the namespaces is dropped to properly decrement reference counts
     /// for any `Value::Ref` entries in the global namespace and return values.
     ///
-    /// Only needed when `ref-count-panic` is enabled, since the Drop impl panics on unfreed Refs.
-    #[cfg(feature = "ref-count-panic")]
+    /// Needed when `ref-count-panic` is enabled (Drop impl panics on unfreed Refs)
+    /// and also by `ref-count-return` testing to clean up after reading ref counts.
+    #[cfg(any(feature = "ref-count-panic", feature = "ref-count-return"))]
     pub fn drop_global_with_heap(&mut self, heap: &mut Heap<impl ResourceTracker>) {
         // Clean up global namespace
         let global = self.get_mut(GLOBAL_NS_IDX);
@@ -247,16 +219,6 @@ impl Namespaces {
         }
         // Clear any pending exception
         self.ext_exception = None;
-    }
-
-    /// Returns the global namespace for final inspection (e.g., ref-count testing).
-    ///
-    /// Consumes the namespaces since the namespace Vec is moved out.
-    ///
-    /// Only available when the `ref-count-return` feature is enabled.
-    #[cfg(feature = "ref-count-return")]
-    pub fn into_global(mut self) -> Namespace {
-        self.stack.swap_remove(GLOBAL_NS_IDX.index())
     }
 
     /// Returns an iterator over all HeapIds referenced by values in all namespaces.

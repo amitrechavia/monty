@@ -24,6 +24,7 @@ use crate::{
     parse::{parse, parse_with_interner},
     prepare::{prepare, prepare_with_existing_names},
     resource::ResourceTracker,
+    run::Executor,
     run_progress::{ExtFunctionResult, NameLookupResult},
     value::Value,
 };
@@ -110,31 +111,12 @@ impl ReplExecutor {
         })
     }
 
-    /// Builds the runtime namespace stack for module execution.
+    /// Creates an empty namespace with all slots set to `Undefined`.
     ///
-    /// External function bindings are inserted first, then input values, then
-    /// remaining slots are initialized to `Undefined`.
-    fn prepare_namespaces(
-        &self,
-        inputs: Vec<MontyObject>,
-        heap: &mut Heap<impl ResourceTracker>,
-    ) -> Result<Namespaces, MontyException> {
-        let Some(extra) = self.namespace_size.checked_sub(inputs.len()) else {
-            return Err(MontyException::runtime_error("too many inputs for namespace"));
-        };
-
-        let mut namespace = Vec::with_capacity(self.namespace_size);
-        for input in inputs {
-            namespace.push(
-                input
-                    .to_value(heap, &self.interns)
-                    .map_err(|e| MontyException::runtime_error(format!("invalid input type: {e}")))?,
-            );
-        }
-        if extra > 0 {
-            namespace.extend((0..extra).map(|_| Value::Undefined));
-        }
-        Ok(Namespaces::new(namespace))
+    /// Input conversion is deferred until the VM is available, allowing `to_value`
+    /// to access the full VM (needed for Dict/Set hashing).
+    fn empty_namespaces(&self) -> Namespaces {
+        Namespaces::new((0..self.namespace_size).map(|_| Value::Undefined).collect())
     }
 }
 
@@ -142,32 +124,33 @@ impl ReplExecutor {
 ///
 /// REPL initialization executes like normal module execution, which must reject
 /// suspendable outcomes when called through non-iterative APIs.
+///
+/// Must be called while the VM is alive — `MontyObject::new` needs `&mut VM`.
 fn frame_exit_to_object(
     frame_exit_result: RunResult<FrameExit>,
-    heap: &mut Heap<impl ResourceTracker>,
-    interns: &Interns,
+    vm: &mut VM<'_, '_, impl ResourceTracker>,
 ) -> RunResult<MontyObject> {
     match frame_exit_result? {
-        FrameExit::Return(return_value) => Ok(MontyObject::new(return_value, heap, interns)),
+        FrameExit::Return(return_value) => Ok(MontyObject::new(return_value, vm)),
         FrameExit::ExternalCall {
             function_name, args, ..
         } => {
-            args.drop_with_heap(vm);
-            let function_name = function_name.as_str(interns);
+            args.drop_with_heap(vm.heap);
+            let function_name = function_name.as_str(vm.interns);
             Err(ExcType::not_implemented(format!(
                 "External function '{function_name}' not implemented with standard execution"
             ))
             .into())
         }
         FrameExit::OsCall { function, args, .. } => {
-            args.drop_with_heap(vm);
+            args.drop_with_heap(vm.heap);
             Err(ExcType::not_implemented(format!(
                 "OS function '{function}' not implemented with standard execution"
             ))
             .into())
         }
         FrameExit::MethodCall { method_name, args, .. } => {
-            args.drop_with_heap(vm);
+            args.drop_with_heap(vm.heap);
             let name = method_name.as_str(vm.interns);
             Err(
                 ExcType::not_implemented(format!("Method call '{name}' not implemented with standard execution"))
@@ -178,7 +161,7 @@ fn frame_exit_to_object(
             Err(ExcType::not_implemented("async futures not supported by standard execution.").into())
         }
         FrameExit::NameLookup { name_id, .. } => {
-            let name = interns.get_str(name_id);
+            let name = vm.interns.get_str(name_id);
             Err(ExcType::name_error(name).into())
         }
     }
@@ -285,9 +268,11 @@ impl<T: ResourceTracker> MontyRepl<T> {
         let executor = ReplExecutor::new(code, script_name, input_names)?;
 
         let mut heap = Heap::new(executor.namespace_size, resource_tracker);
-        let mut namespaces = executor.prepare_namespaces(inputs, &mut heap)?;
+        let mut namespaces = executor.empty_namespaces();
 
+        // Create VM and populate inputs (conversion needs VM for Dict/Set hashing)
         let mut vm = VM::new(&mut heap, &mut namespaces, &executor.interns, print);
+        Executor::populate_inputs(inputs, executor.namespace_size, &mut vm)?;
         let mut frame_exit_result = vm.run_module(&executor.module_code);
 
         // Handle NameLookup exits by raising NameError through the VM so that
@@ -415,7 +400,11 @@ impl<T: ResourceTracker> MontyRepl<T> {
             frame_exit_result = vm.resume_with_exception(err.into());
         }
 
+        // Convert result while VM is alive (MontyObject::new needs &mut VM)
+        let result = frame_exit_to_object(frame_exit_result, &mut vm);
+
         vm.cleanup();
+        // NLL: vm's borrows of self.heap/self.namespaces end here
 
         // Commit compiler metadata even on runtime errors.
         // Snippets can mutate globals before raising, and those values may contain
@@ -423,8 +412,7 @@ impl<T: ResourceTracker> MontyRepl<T> {
         self.global_name_map = name_map;
         self.interns = interns;
 
-        frame_exit_to_object(frame_exit_result, &mut self.heap, &self.interns)
-            .map_err(|e| e.into_python_exception(&self.interns, &code))
+        result.map_err(|e| e.into_python_exception(&self.interns, &code))
     }
 
     /// Executes a snippet with no additional host output wiring.
@@ -712,7 +700,16 @@ impl<T: ResourceTracker> ReplNameLookup<T> {
         // borrows heap/namespaces mutably and we need direct access for caching.
         let resolved_value = match result {
             NameLookupResult::Value(obj) => {
-                let value = match obj.to_value(&mut repl.heap, &executor.interns) {
+                // Create temporary VM for to_value conversion (needs &mut VM for Dict/Set hashing).
+                // The block scope ensures VM borrows are released before we access repl again.
+                let value_result = {
+                    let mut print_tmp = PrintWriter::Disabled;
+                    let mut vm = VM::new(&mut repl.heap, &mut repl.namespaces, &executor.interns, &mut print_tmp);
+                    let result = obj.to_value(&mut vm);
+                    vm.cleanup();
+                    result
+                };
+                let value = match value_result {
                     Ok(v) => v,
                     Err(e) => {
                         let error = MontyException::runtime_error(format!("invalid name lookup result: {e}"));
@@ -975,7 +972,14 @@ fn handle_repl_vm_result<T: ResourceTracker>(
 
     match result {
         Ok(FrameExit::Return(value)) => {
-            let output = MontyObject::new(value, &mut repl.heap, &executor.interns);
+            // Create temporary VM for MontyObject conversion (needs &mut VM)
+            let output = {
+                let mut print = PrintWriter::Disabled;
+                let mut vm = VM::new(&mut repl.heap, &mut repl.namespaces, &executor.interns, &mut print);
+                let o = MontyObject::new(value, &mut vm);
+                vm.cleanup();
+                o
+            };
             let ReplExecutor { name_map, interns, .. } = executor;
             repl.global_name_map = name_map;
             repl.interns = interns;
@@ -988,7 +992,14 @@ fn handle_repl_vm_result<T: ResourceTracker>(
             ..
         }) => {
             let function_name = function_name.into_string(&executor.interns);
-            let (args_py, kwargs_py) = args.into_py_objects(&mut repl.heap, &executor.interns);
+            // Create temporary VM for args conversion (needs &mut VM)
+            let (args_py, kwargs_py) = {
+                let mut print = PrintWriter::Disabled;
+                let mut vm = VM::new(&mut repl.heap, &mut repl.namespaces, &executor.interns, &mut print);
+                let result = args.into_py_objects(&mut vm);
+                vm.cleanup();
+                result
+            };
 
             Ok(ReplProgress::FunctionCall(ReplFunctionCall {
                 function_name,
@@ -1004,7 +1015,14 @@ fn handle_repl_vm_result<T: ResourceTracker>(
             args,
             call_id,
         }) => {
-            let (args_py, kwargs_py) = args.into_py_objects(&mut repl.heap, &executor.interns);
+            // Create temporary VM for args conversion (needs &mut VM)
+            let (args_py, kwargs_py) = {
+                let mut print = PrintWriter::Disabled;
+                let mut vm = VM::new(&mut repl.heap, &mut repl.namespaces, &executor.interns, &mut print);
+                let result = args.into_py_objects(&mut vm);
+                vm.cleanup();
+                result
+            };
 
             Ok(ReplProgress::OsCall(ReplOsCall {
                 function,
@@ -1020,7 +1038,14 @@ fn handle_repl_vm_result<T: ResourceTracker>(
             call_id,
         }) => {
             let function_name = method_name.into_string(&executor.interns);
-            let (args_py, kwargs_py) = args.into_py_objects(&mut repl.heap, &executor.interns);
+            // Create temporary VM for args conversion (needs &mut VM)
+            let (args_py, kwargs_py) = {
+                let mut print = PrintWriter::Disabled;
+                let mut vm = VM::new(&mut repl.heap, &mut repl.namespaces, &executor.interns, &mut print);
+                let result = args.into_py_objects(&mut vm);
+                vm.cleanup();
+                result
+            };
 
             Ok(ReplProgress::FunctionCall(ReplFunctionCall {
                 function_name,

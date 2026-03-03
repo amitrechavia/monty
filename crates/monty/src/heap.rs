@@ -581,7 +581,7 @@ impl PyTrait for HeapData {
     fn py_iadd(
         &mut self,
         other: Value,
-        vm: &VM<'_, '_, impl ResourceTracker>,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
         self_id: Option<HeapId>,
     ) -> Result<bool, crate::resource::ResourceError> {
         match self {

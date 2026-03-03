@@ -727,6 +727,22 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
         self.run()
     }
 
+    /// Sets a value in the global namespace at the given slot index.
+    ///
+    /// Used at execution boundaries to populate input values after VM creation,
+    /// where inputs are converted to `Value` via `to_value(vm)` then stored.
+    pub(crate) fn set_global(&mut self, idx: usize, value: Value) {
+        self.namespaces.get_mut(GLOBAL_NS_IDX).mut_vec()[idx] = value;
+    }
+
+    /// Gets an optional reference to a value in the global namespace.
+    ///
+    /// Used by ref-count testing to inspect namespace values while the VM is alive.
+    #[cfg(feature = "ref-count-return")]
+    pub(crate) fn get_global_opt(&self, idx: NamespaceId) -> Option<&Value> {
+        self.namespaces.get(GLOBAL_NS_IDX).get_opt(idx)
+    }
+
     /// Cleans up VM state before the VM is dropped.
     ///
     /// This method must be called before the VM goes out of scope to ensure
@@ -1579,7 +1595,7 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
         let module = BuiltinModule::from_repr(module_id).expect("unknown module id");
 
         // Create the module on the heap using pre-interned strings
-        let heap_id = module.create(self.heap, self.interns)?;
+        let heap_id = module.create(self)?;
         self.push(Value::Ref(heap_id));
         Ok(())
     }
@@ -1589,7 +1605,7 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
     /// Pushes the return value onto the stack and continues execution.
     pub fn resume(&mut self, obj: MontyObject) -> Result<FrameExit, RunError> {
         let value = obj
-            .to_value(self.heap, self.interns)
+            .to_value(self)
             .map_err(|e| SimpleException::new(ExcType::RuntimeError, Some(format!("invalid return type: {e}"))))?;
         self.push(value);
         self.run()

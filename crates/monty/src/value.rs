@@ -1628,17 +1628,12 @@ impl Value {
     /// Accepts `EitherStr` to support both interned and heap-allocated attribute names.
     ///
     /// Returns `AttributeError` for other types or unknown attributes.
-    pub fn py_getattr(
-        &self,
-        attr: &EitherStr,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> RunResult<AttrCallResult> {
+    pub fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<AttrCallResult> {
         match self {
             Self::Ref(heap_id) => {
                 // Use with_entry_mut to get access to both data and heap without borrow conflicts.
                 // This allows py_getattr to allocate (for computed attributes) while we hold the data.
-                let opt_result = heap.with_entry_mut(*heap_id, |heap, data| data.py_getattr(attr, heap, interns))?;
+                let opt_result = Heap::with_entry_mut(vm, *heap_id, |vm, data| data.py_getattr(attr, vm))?;
                 if let Some(call_result) = opt_result {
                     return Ok(call_result);
                 }
@@ -1646,19 +1641,19 @@ impl Value {
             Self::Builtin(Builtins::Type(t)) => {
                 // Handle type object attributes like __name__
                 let is_dunder_name = attr.static_string().map_or_else(
-                    || attr.as_str(interns) == "__name__",
+                    || attr.as_str(vm.interns) == "__name__",
                     |ss| ss == StaticStrings::DunderName,
                 );
                 if is_dunder_name {
                     let name_str = t.to_string();
-                    let str_id = heap.allocate(HeapData::Str(Str::from(name_str)))?;
+                    let str_id = vm.heap.allocate(HeapData::Str(Str::from(name_str)))?;
                     return Ok(AttrCallResult::Value(Self::Ref(str_id)));
                 }
             }
             _ => {}
         }
-        let type_name = self.py_type(heap);
-        Err(ExcType::attribute_error(type_name, attr.as_str(interns)))
+        let type_name = self.py_type(vm.heap);
+        Err(ExcType::attribute_error(type_name, attr.as_str(vm.interns)))
     }
 
     /// Sets an attribute on this value.
@@ -1672,23 +1667,22 @@ impl Value {
         &self,
         name_id: StringId,
         value: Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> RunResult<()> {
-        let attr_name = interns.get_str(name_id);
+        let attr_name = vm.interns.get_str(name_id);
 
         if let Self::Ref(heap_id) = self {
             let heap_id = *heap_id;
-            let is_dataclass = matches!(heap.get(heap_id), HeapData::Dataclass(_));
+            let is_dataclass = matches!(vm.heap.get(heap_id), HeapData::Dataclass(_));
 
             if is_dataclass {
                 let name_value = Self::InternString(name_id);
-                heap.with_entry_mut(heap_id, |heap, data| {
+                Heap::with_entry_mut(vm, heap_id, |vm, data| {
                     if let HeapDataMut::Dataclass(dc) = data {
-                        match dc.set_attr(name_value, value, heap, interns) {
+                        match dc.set_attr(name_value, value, vm) {
                             Ok(old_value) => {
                                 if let Some(old) = old_value {
-                                    old.drop_with_heap(heap);
+                                    old.drop_with_heap(vm);
                                 }
                                 Ok(())
                             }
@@ -1699,13 +1693,13 @@ impl Value {
                     }
                 })
             } else {
-                let type_name = heap.get(heap_id).py_type(heap);
-                value.drop_with_heap(heap);
+                let type_name = vm.heap.get(heap_id).py_type(vm.heap);
+                value.drop_with_heap(vm);
                 Err(ExcType::attribute_error_no_setattr(type_name, attr_name))
             }
         } else {
-            let type_name = self.py_type(heap);
-            value.drop_with_heap(heap);
+            let type_name = self.py_type(vm.heap);
+            value.drop_with_heap(vm);
             Err(ExcType::attribute_error_no_setattr(type_name, attr_name))
         }
     }

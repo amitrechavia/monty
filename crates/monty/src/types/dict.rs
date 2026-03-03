@@ -332,7 +332,7 @@ impl Dict {
             }
 
             let kwargs = kwargs_guard.into_inner();
-            dict_merge_from_kwargs(dict, kwargs, vm.heap, vm.interns)?;
+            dict_merge_from_kwargs(dict, kwargs, vm)?;
         }
 
         let dict = dict_guard.into_inner();
@@ -590,10 +590,10 @@ impl PyTrait for Dict {
             }
             StaticStrings::Copy => {
                 args.check_zero_args("dict.copy", vm.heap)?;
-                dict_copy(self, vm.heap, vm.interns)
+                dict_copy(self, vm)
             }
             StaticStrings::Update => dict_update(self, args, vm),
-            StaticStrings::Setdefault => dict_setdefault(self, args, vm.heap, vm.interns),
+            StaticStrings::Setdefault => dict_setdefault(self, args, vm),
             StaticStrings::Popitem => {
                 args.check_zero_args("dict.popitem", vm.heap)?;
                 dict_popitem(self, vm.heap)
@@ -633,15 +633,15 @@ fn dict_clear(dict: &mut Dict, heap: &mut Heap<impl ResourceTracker>) {
 /// Implements Python's `dict.copy()` method.
 ///
 /// Returns a shallow copy of the dict.
-fn dict_copy(dict: &Dict, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Value> {
+fn dict_copy(dict: &Dict, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Value> {
     // Copy all key-value pairs (incrementing refcounts)
     let pairs: Vec<(Value, Value)> = dict
         .iter()
-        .map(|(k, v)| (k.clone_with_heap(heap), v.clone_with_heap(heap)))
+        .map(|(k, v)| (k.clone_with_heap(vm.heap), v.clone_with_heap(vm.heap)))
         .collect();
 
-    let new_dict = Dict::from_pairs(pairs, heap, interns)?;
-    let heap_id = heap.allocate(HeapData::Dict(new_dict))?;
+    let new_dict = Dict::from_pairs(pairs, vm)?;
+    let heap_id = vm.heap.allocate(HeapData::Dict(new_dict))?;
     Ok(Value::Ref(heap_id))
 }
 
@@ -666,7 +666,7 @@ fn dict_update(dict: &mut Dict, args: ArgValues, vm: &mut VM<'_, '_, impl Resour
     }
 
     let kwargs = kwargs_guard.into_inner();
-    dict_merge_from_kwargs(dict, kwargs, vm.heap, vm.interns)?;
+    dict_merge_from_kwargs(dict, kwargs, vm)?;
     Ok(Value::None)
 }
 
@@ -762,20 +762,19 @@ fn dict_merge_from_iterable_pairs(
 fn dict_merge_from_kwargs(
     dict: &mut Dict,
     kwargs: KwargsValues,
-    heap: &mut Heap<impl ResourceTracker>,
-    interns: &Interns,
+    vm: &mut VM<'_, '_, impl ResourceTracker>,
 ) -> RunResult<()> {
     // Use while-let to allow draining remaining kwargs on error.
     let mut kwargs_iter = kwargs.into_iter();
     while let Some((key, value)) = kwargs_iter.next() {
         // Drop remaining kwargs before propagating an insertion error.
-        match dict.set(key, value, heap, interns) {
-            Ok(Some(old_value)) => old_value.drop_with_heap(heap),
+        match dict.set(key, value, vm) {
+            Ok(Some(old_value)) => old_value.drop_with_heap(vm),
             Ok(None) => {}
             Err(e) => {
                 for (k, v) in kwargs_iter {
-                    k.drop_with_heap(heap);
-                    v.drop_with_heap(heap);
+                    k.drop_with_heap(vm.heap);
+                    v.drop_with_heap(vm.heap);
                 }
                 return Err(e);
             }
@@ -788,29 +787,24 @@ fn dict_merge_from_kwargs(
 ///
 /// If key is in the dict, return its value.
 /// If not, insert key with a value of default (or None) and return default.
-fn dict_setdefault(
-    dict: &mut Dict,
-    args: ArgValues,
-    heap: &mut Heap<impl ResourceTracker>,
-    interns: &Interns,
-) -> RunResult<Value> {
-    let (key, default) = args.get_one_two_args("setdefault", heap)?;
+fn dict_setdefault(dict: &mut Dict, args: ArgValues, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Value> {
+    let (key, default) = args.get_one_two_args("setdefault", vm.heap)?;
     let default = default.unwrap_or(Value::None);
-    let mut key_guard = HeapGuard::new(key, heap);
-    let (key, heap) = key_guard.as_parts();
+    let mut key_guard = HeapGuard::new(key, vm);
+    let (key, vm) = key_guard.as_parts_mut();
 
-    if let Some(existing) = dict.get(key, heap, interns)? {
+    if let Some(existing) = dict.get(key, vm)? {
         // Key exists - return its value (cloned)
-        let value = existing.clone_with_heap(heap);
-        default.drop_with_heap(heap);
+        let value = existing.clone_with_heap(vm.heap);
+        default.drop_with_heap(vm.heap);
         Ok(value)
     } else {
         // Key doesn't exist - insert default and return it (cloned before insertion)
-        let return_value = default.clone_with_heap(heap);
-        let (key, heap) = key_guard.into_parts();
-        if let Some(old_value) = dict.set(key, default, heap, interns)? {
+        let return_value = default.clone_with_heap(vm.heap);
+        let (key, vm) = key_guard.into_parts();
+        if let Some(old_value) = dict.set(key, default, vm)? {
             // This shouldn't happen since we checked, but handle it anyway
-            old_value.drop_with_heap(heap);
+            old_value.drop_with_heap(vm);
         }
         Ok(return_value)
     }
@@ -900,7 +894,7 @@ pub fn dict_fromkeys(args: ArgValues, vm: &mut VM<'_, '_, impl ResourceTracker>)
         let (dict, vm) = dict_guard.as_parts_mut();
 
         while let Some(key) = iter.for_next(vm)? {
-            if let Some(old_value) = dict.set(key, default.clone_with_heap(vm), vm.heap, vm.interns)? {
+            if let Some(old_value) = dict.set(key, default.clone_with_heap(vm), vm)? {
                 old_value.drop_with_heap(vm);
             }
         }

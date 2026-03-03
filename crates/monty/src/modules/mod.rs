@@ -9,9 +9,10 @@ use strum::FromRepr;
 
 use crate::{
     args::ArgValues,
+    bytecode::VM,
     exception_private::RunResult,
     heap::{Heap, HeapId},
-    intern::{Interns, StaticStrings, StringId},
+    intern::{StaticStrings, StringId},
     resource::{ResourceError, ResourceTracker},
     types::AttrCallResult,
 };
@@ -58,13 +59,13 @@ impl BuiltinModule {
     /// # Panics
     ///
     /// Panics if the required strings have not been pre-interned during prepare phase.
-    pub fn create(self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> Result<HeapId, ResourceError> {
+    pub fn create(self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<HeapId, ResourceError> {
         match self {
-            Self::Sys => sys::create_module(heap, interns),
-            Self::Typing => typing::create_module(heap, interns),
-            Self::Asyncio => asyncio::create_module(heap, interns),
-            Self::Pathlib => pathlib::create_module(heap, interns),
-            Self::Os => os::create_module(heap, interns),
+            Self::Sys => sys::create_module(vm),
+            Self::Typing => typing::create_module(vm),
+            Self::Asyncio => asyncio::create_module(vm),
+            Self::Pathlib => pathlib::create_module(vm),
+            Self::Os => os::create_module(vm),
         }
     }
 }

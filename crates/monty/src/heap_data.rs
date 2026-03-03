@@ -160,8 +160,7 @@ impl HeapDataMut<'_> {
     /// avoiding unnecessary hash computation for values that are never used as keys.
     pub fn compute_hash_if_immutable(
         &self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> Result<Option<u64>, ResourceError> {
         match self {
             // Hash just the actual string or bytes content for consistency with Value::InternString/InternBytes
@@ -179,16 +178,16 @@ impl HeapDataMut<'_> {
             Self::FrozenSet(fs) => {
                 // FrozenSet hash is XOR of element hashes (order-independent)
                 // Recursion depth is checked inside compute_hash
-                fs.compute_hash(heap, interns)
+                fs.compute_hash(vm)
             }
             Self::Tuple(t) => {
-                let token = heap.incr_recursion_depth()?;
-                crate::defer_drop!(token, heap);
+                let token = vm.heap.incr_recursion_depth()?;
+                crate::defer_drop!(token, vm);
                 let mut hasher = DefaultHasher::new();
                 discriminant(self).hash(&mut hasher);
                 // Tuple is hashable only if all elements are hashable
                 for obj in t.as_slice() {
-                    match obj.py_hash(heap, interns)? {
+                    match obj.py_hash(vm)? {
                         Some(h) => h.hash(&mut hasher),
                         None => return Ok(None),
                     }
@@ -196,13 +195,13 @@ impl HeapDataMut<'_> {
                 Ok(Some(hasher.finish()))
             }
             Self::NamedTuple(nt) => {
-                let token = heap.incr_recursion_depth()?;
-                crate::defer_drop!(token, heap);
+                let token = vm.heap.incr_recursion_depth()?;
+                crate::defer_drop!(token, vm);
                 let mut hasher = DefaultHasher::new();
                 discriminant(self).hash(&mut hasher);
                 // Hash only by elements (not type_name) to match equality semantics
                 for obj in nt.as_vec() {
-                    match obj.py_hash(heap, interns)? {
+                    match obj.py_hash(vm)? {
                         Some(h) => h.hash(&mut hasher),
                         None => return Ok(None),
                     }
@@ -233,7 +232,7 @@ impl HeapDataMut<'_> {
             }
             // Dataclass hashability depends on the mutable flag
             // Recursion depth is checked inside compute_hash
-            Self::Dataclass(dc) => dc.compute_hash(heap, interns),
+            Self::Dataclass(dc) => dc.compute_hash(vm),
             // Slices are immutable and hashable (like in CPython)
             Self::Slice(slice) => {
                 let mut hasher = DefaultHasher::new();
@@ -356,18 +355,13 @@ impl PyTrait for HeapDataMut<'_> {
         }
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
         match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_eq(b, heap, interns),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_eq(b, heap, interns),
-            (Self::List(a), Self::List(b)) => a.py_eq(b, heap, interns),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_eq(b, heap, interns),
-            (Self::NamedTuple(a), Self::NamedTuple(b)) => a.py_eq(b, heap, interns),
+            (Self::Str(a), Self::Str(b)) => a.py_eq(b, vm),
+            (Self::Bytes(a), Self::Bytes(b)) => a.py_eq(b, vm),
+            (Self::List(a), Self::List(b)) => a.py_eq(b, vm),
+            (Self::Tuple(a), Self::Tuple(b)) => a.py_eq(b, vm),
+            (Self::NamedTuple(a), Self::NamedTuple(b)) => a.py_eq(b, vm),
             // NamedTuple can compare with Tuple by elements (matching CPython behavior)
             (Self::NamedTuple(nt), Self::Tuple(t)) | (Self::Tuple(t), Self::NamedTuple(nt)) => {
                 let nt_items = nt.as_vec();
@@ -375,28 +369,28 @@ impl PyTrait for HeapDataMut<'_> {
                 if nt_items.len() != t_items.len() {
                     return Ok(false);
                 }
-                let token = heap.incr_recursion_depth()?;
-                crate::defer_drop!(token, heap);
+                let token = vm.heap.incr_recursion_depth()?;
+                crate::defer_drop!(token, vm);
                 for (a, b) in nt_items.iter().zip(t_items.iter()) {
-                    if !a.py_eq(b, heap, interns)? {
+                    if !a.py_eq(b, vm)? {
                         return Ok(false);
                     }
                 }
                 Ok(true)
             }
-            (Self::Dict(a), Self::Dict(b)) => a.py_eq(b, heap, interns),
-            (Self::Set(a), Self::Set(b)) => a.py_eq(b, heap, interns),
-            (Self::FrozenSet(a), Self::FrozenSet(b)) => a.py_eq(b, heap, interns),
+            (Self::Dict(a), Self::Dict(b)) => a.py_eq(b, vm),
+            (Self::Set(a), Self::Set(b)) => a.py_eq(b, vm),
+            (Self::FrozenSet(a), Self::FrozenSet(b)) => a.py_eq(b, vm),
             (Self::Closure(a), Self::Closure(b)) => Ok(a.func_id == b.func_id && a.cells == b.cells),
             (Self::FunctionDefaults(a), Self::FunctionDefaults(b)) => Ok(a.func_id == b.func_id),
-            (Self::Range(a), Self::Range(b)) => a.py_eq(b, heap, interns),
-            (Self::Dataclass(a), Self::Dataclass(b)) => a.py_eq(b, heap, interns),
+            (Self::Range(a), Self::Range(b)) => a.py_eq(b, vm),
+            (Self::Dataclass(a), Self::Dataclass(b)) => a.py_eq(b, vm),
             // LongInt equality
             (Self::LongInt(a), Self::LongInt(b)) => Ok(a == b),
             // Slice equality
-            (Self::Slice(a), Self::Slice(b)) => a.py_eq(b, heap, interns),
+            (Self::Slice(a), Self::Slice(b)) => a.py_eq(b, vm),
             // Path equality
-            (Self::Path(a), Self::Path(b)) => a.py_eq(b, heap, interns),
+            (Self::Path(a), Self::Path(b)) => a.py_eq(b, vm),
             // Cells, Exceptions, Iterators, Modules, and async types compare by identity only (handled at Value level via HeapId comparison)
             (Self::Cell(_), Self::Cell(_))
             | (Self::Exception(_), Self::Exception(_))
@@ -489,45 +483,44 @@ impl PyTrait for HeapDataMut<'_> {
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        heap: &Heap<impl ResourceTracker>,
+        vm: &VM<'_, '_, impl ResourceTracker>,
         heap_ids: &mut AHashSet<HeapId>,
-        interns: &Interns,
     ) -> std::fmt::Result {
         match self {
-            Self::Str(s) => s.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::Bytes(b) => b.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::List(l) => l.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::Tuple(t) => t.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::NamedTuple(nt) => nt.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::Dict(d) => d.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::Set(s) => s.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::FrozenSet(fs) => fs.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::Closure(closure) => interns.get_function(closure.func_id).py_repr_fmt(f, interns, 0),
-            Self::FunctionDefaults(fd) => interns.get_function(fd.func_id).py_repr_fmt(f, interns, 0),
+            Self::Str(s) => s.py_repr_fmt(f, vm, heap_ids),
+            Self::Bytes(b) => b.py_repr_fmt(f, vm, heap_ids),
+            Self::List(l) => l.py_repr_fmt(f, vm, heap_ids),
+            Self::Tuple(t) => t.py_repr_fmt(f, vm, heap_ids),
+            Self::NamedTuple(nt) => nt.py_repr_fmt(f, vm, heap_ids),
+            Self::Dict(d) => d.py_repr_fmt(f, vm, heap_ids),
+            Self::Set(s) => s.py_repr_fmt(f, vm, heap_ids),
+            Self::FrozenSet(fs) => fs.py_repr_fmt(f, vm, heap_ids),
+            Self::Closure(closure) => vm.interns.get_function(closure.func_id).py_repr_fmt(f, vm.interns, 0),
+            Self::FunctionDefaults(fd) => vm.interns.get_function(fd.func_id).py_repr_fmt(f, vm.interns, 0),
             // Cell repr shows the contained value's type
-            Self::Cell(cell) => write!(f, "<cell: {} object>", cell.0.py_type(heap)),
-            Self::Range(r) => r.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::Slice(s) => s.py_repr_fmt(f, heap, heap_ids, interns),
+            Self::Cell(cell) => write!(f, "<cell: {} object>", cell.0.py_type(vm.heap)),
+            Self::Range(r) => r.py_repr_fmt(f, vm, heap_ids),
+            Self::Slice(s) => s.py_repr_fmt(f, vm, heap_ids),
             Self::Exception(e) => e.py_repr_fmt(f),
-            Self::Dataclass(dc) => dc.py_repr_fmt(f, heap, heap_ids, interns),
+            Self::Dataclass(dc) => dc.py_repr_fmt(f, vm, heap_ids),
             Self::Iter(_) => write!(f, "<iterator>"),
             Self::LongInt(li) => write!(f, "{li}"),
-            Self::Module(m) => write!(f, "<module '{}'>", interns.get_str(m.name())),
+            Self::Module(m) => write!(f, "<module '{}'>", vm.interns.get_str(m.name())),
             Self::Coroutine(coro) => {
-                let func = interns.get_function(coro.func_id);
-                let name = interns.get_str(func.name.name_id);
+                let func = vm.interns.get_function(coro.func_id);
+                let name = vm.interns.get_str(func.name.name_id);
                 write!(f, "<coroutine object {name}>")
             }
             Self::GatherFuture(gather) => write!(f, "<gather({})>", gather.item_count()),
-            Self::Path(p) => p.py_repr_fmt(f, heap, heap_ids, interns),
+            Self::Path(p) => p.py_repr_fmt(f, vm, heap_ids),
             Self::ExtFunction(name) => write!(f, "<function '{name}' external>"),
         }
     }
 
-    fn py_str(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Cow<'static, str> {
+    fn py_str(&self, vm: &VM<'_, '_, impl ResourceTracker>) -> Cow<'static, str> {
         match self {
             // Strings return their value directly without quotes
-            Self::Str(s) => s.py_str(heap, interns),
+            Self::Str(s) => s.py_str(vm),
             // LongInt returns its string representation
             Self::LongInt(li) => Cow::Owned(li.to_string()),
             // Exceptions return just the message (or empty string if no message)
@@ -535,25 +528,24 @@ impl PyTrait for HeapDataMut<'_> {
             // Paths return the path string without the PosixPath() wrapper
             Self::Path(p) => Cow::Owned(p.as_str().to_owned()),
             // All other types use repr
-            _ => self.py_repr(heap, interns),
+            _ => self.py_repr(vm),
         }
     }
 
     fn py_add(
         &self,
         other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> Result<Option<Value>, crate::resource::ResourceError> {
         match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_add(b, heap, interns),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_add(b, heap, interns),
-            (Self::List(a), Self::List(b)) => a.py_add(b, heap, interns),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_add(b, heap, interns),
-            (Self::Dict(a), Self::Dict(b)) => a.py_add(b, heap, interns),
+            (Self::Str(a), Self::Str(b)) => a.py_add(b, vm),
+            (Self::Bytes(a), Self::Bytes(b)) => a.py_add(b, vm),
+            (Self::List(a), Self::List(b)) => a.py_add(b, vm),
+            (Self::Tuple(a), Self::Tuple(b)) => a.py_add(b, vm),
+            (Self::Dict(a), Self::Dict(b)) => a.py_add(b, vm),
             (Self::LongInt(a), Self::LongInt(b)) => {
                 let bi = a.inner() + b.inner();
-                Ok(LongInt::new(bi).into_value(heap).map(Some)?)
+                Ok(LongInt::new(bi).into_value(vm.heap).map(Some)?)
             }
             // Cells and Dataclasses don't support arithmetic operations
             _ => Ok(None),
@@ -563,19 +555,19 @@ impl PyTrait for HeapDataMut<'_> {
     fn py_sub(
         &self,
         other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> Result<Option<Value>, crate::resource::ResourceError> {
         match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_sub(b, heap),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_sub(b, heap),
-            (Self::List(a), Self::List(b)) => a.py_sub(b, heap),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_sub(b, heap),
-            (Self::Dict(a), Self::Dict(b)) => a.py_sub(b, heap),
-            (Self::Set(a), Self::Set(b)) => a.py_sub(b, heap),
-            (Self::FrozenSet(a), Self::FrozenSet(b)) => a.py_sub(b, heap),
+            (Self::Str(a), Self::Str(b)) => a.py_sub(b, vm),
+            (Self::Bytes(a), Self::Bytes(b)) => a.py_sub(b, vm),
+            (Self::List(a), Self::List(b)) => a.py_sub(b, vm),
+            (Self::Tuple(a), Self::Tuple(b)) => a.py_sub(b, vm),
+            (Self::Dict(a), Self::Dict(b)) => a.py_sub(b, vm),
+            (Self::Set(a), Self::Set(b)) => a.py_sub(b, vm),
+            (Self::FrozenSet(a), Self::FrozenSet(b)) => a.py_sub(b, vm),
             (Self::LongInt(a), Self::LongInt(b)) => {
                 let bi = a.inner() - b.inner();
-                Ok(LongInt::new(bi).into_value(heap).map(Some)?)
+                Ok(LongInt::new(bi).into_value(vm.heap).map(Some)?)
             }
             // Cells don't support arithmetic operations
             _ => Ok(None),
@@ -585,20 +577,20 @@ impl PyTrait for HeapDataMut<'_> {
     fn py_mod(
         &self,
         other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> crate::exception_private::RunResult<Option<Value>> {
         match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_mod(b, heap),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_mod(b, heap),
-            (Self::List(a), Self::List(b)) => a.py_mod(b, heap),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_mod(b, heap),
-            (Self::Dict(a), Self::Dict(b)) => a.py_mod(b, heap),
+            (Self::Str(a), Self::Str(b)) => a.py_mod(b, vm),
+            (Self::Bytes(a), Self::Bytes(b)) => a.py_mod(b, vm),
+            (Self::List(a), Self::List(b)) => a.py_mod(b, vm),
+            (Self::Tuple(a), Self::Tuple(b)) => a.py_mod(b, vm),
+            (Self::Dict(a), Self::Dict(b)) => a.py_mod(b, vm),
             (Self::LongInt(a), Self::LongInt(b)) => {
                 if b.is_zero() {
                     Err(crate::exception_private::ExcType::zero_division().into())
                 } else {
                     let bi = a.inner().mod_floor(b.inner());
-                    Ok(LongInt::new(bi).into_value(heap).map(Some)?)
+                    Ok(LongInt::new(bi).into_value(vm.heap).map(Some)?)
                 }
             }
             // Cells don't support arithmetic operations
@@ -621,19 +613,18 @@ impl PyTrait for HeapDataMut<'_> {
     fn py_iadd(
         &mut self,
         other: Value,
-        heap: &mut Heap<impl ResourceTracker>,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
         self_id: Option<HeapId>,
-        interns: &Interns,
     ) -> Result<bool, crate::resource::ResourceError> {
         match self {
-            Self::Str(s) => s.py_iadd(other, heap, self_id, interns),
-            Self::Bytes(b) => b.py_iadd(other, heap, self_id, interns),
-            Self::List(l) => l.py_iadd(other, heap, self_id, interns),
-            Self::Tuple(t) => t.py_iadd(other, heap, self_id, interns),
-            Self::Dict(d) => d.py_iadd(other, heap, self_id, interns),
+            Self::Str(s) => s.py_iadd(other, vm, self_id),
+            Self::Bytes(b) => b.py_iadd(other, vm, self_id),
+            Self::List(l) => l.py_iadd(other, vm, self_id),
+            Self::Tuple(t) => t.py_iadd(other, vm, self_id),
+            Self::Dict(d) => d.py_iadd(other, vm, self_id),
             _ => {
                 // Drop other if it's a Ref (ensure proper refcounting for unsupported types)
-                other.drop_with_heap(heap);
+                other.drop_with_heap(vm);
                 Ok(false)
             }
         }
@@ -661,49 +652,42 @@ impl PyTrait for HeapDataMut<'_> {
         }
     }
 
-    fn py_getitem(&self, key: &Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Value> {
+    fn py_getitem(&self, key: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Value> {
         match self {
-            Self::Str(s) => s.py_getitem(key, heap, interns),
-            Self::Bytes(b) => b.py_getitem(key, heap, interns),
-            Self::List(l) => l.py_getitem(key, heap, interns),
-            Self::Tuple(t) => t.py_getitem(key, heap, interns),
-            Self::NamedTuple(nt) => nt.py_getitem(key, heap, interns),
-            Self::Dict(d) => d.py_getitem(key, heap, interns),
-            Self::Range(r) => r.py_getitem(key, heap, interns),
-            _ => Err(ExcType::type_error_not_sub(self.py_type(heap))),
+            Self::Str(s) => s.py_getitem(key, vm),
+            Self::Bytes(b) => b.py_getitem(key, vm),
+            Self::List(l) => l.py_getitem(key, vm),
+            Self::Tuple(t) => t.py_getitem(key, vm),
+            Self::NamedTuple(nt) => nt.py_getitem(key, vm),
+            Self::Dict(d) => d.py_getitem(key, vm),
+            Self::Range(r) => r.py_getitem(key, vm),
+            _ => Err(ExcType::type_error_not_sub(self.py_type(vm.heap))),
         }
     }
 
-    fn py_setitem(
-        &mut self,
-        key: Value,
-        value: Value,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> RunResult<()> {
+    fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<()> {
         match self {
-            Self::Str(s) => s.py_setitem(key, value, heap, interns),
-            Self::Bytes(b) => b.py_setitem(key, value, heap, interns),
-            Self::List(l) => l.py_setitem(key, value, heap, interns),
-            Self::Tuple(t) => t.py_setitem(key, value, heap, interns),
-            Self::Dict(d) => d.py_setitem(key, value, heap, interns),
-            _ => Err(ExcType::type_error_not_sub_assignment(self.py_type(heap))),
+            Self::Str(s) => s.py_setitem(key, value, vm),
+            Self::Bytes(b) => b.py_setitem(key, value, vm),
+            Self::List(l) => l.py_setitem(key, value, vm),
+            Self::Tuple(t) => t.py_setitem(key, value, vm),
+            Self::Dict(d) => d.py_setitem(key, value, vm),
+            _ => Err(ExcType::type_error_not_sub_assignment(self.py_type(vm.heap))),
         }
     }
 
     fn py_getattr(
         &self,
         attr: &EitherStr,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> RunResult<Option<AttrCallResult>> {
         match self {
-            Self::Dataclass(dc) => dc.py_getattr(attr, heap, interns),
-            Self::Module(m) => Ok(m.py_getattr(attr, heap, interns)),
-            Self::NamedTuple(nt) => nt.py_getattr(attr, heap, interns),
-            Self::Slice(s) => s.py_getattr(attr, heap, interns),
-            Self::Exception(exc) => exc.py_getattr(attr, heap, interns),
-            Self::Path(p) => p.py_getattr(attr, heap, interns),
+            Self::Dataclass(dc) => dc.py_getattr(attr, vm),
+            Self::Module(m) => Ok(m.py_getattr(attr, vm)),
+            Self::NamedTuple(nt) => nt.py_getattr(attr, vm),
+            Self::Slice(s) => s.py_getattr(attr, vm),
+            Self::Exception(exc) => exc.py_getattr(attr, vm),
+            Self::Path(p) => p.py_getattr(attr, vm),
             // All other types don't support attribute access via py_getattr
             _ => Ok(None),
         }

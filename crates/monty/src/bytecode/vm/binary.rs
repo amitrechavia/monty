@@ -23,7 +23,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         let lhs = this.pop();
         defer_drop!(lhs, this);
 
-        match lhs.py_add(rhs, this.heap, this.interns) {
+        match lhs.py_add(rhs, this) {
             Ok(Some(v)) => {
                 this.push(v);
                 Ok(())
@@ -48,7 +48,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         let lhs = this.pop();
         defer_drop!(lhs, this);
 
-        match lhs.py_sub(rhs, this.heap) {
+        match lhs.py_sub(rhs, this) {
             Ok(Some(v)) => {
                 this.push(v);
                 Ok(())
@@ -148,7 +148,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         let lhs = this.pop();
         defer_drop!(lhs, this);
 
-        match lhs.py_mod(rhs, this.heap) {
+        match lhs.py_mod(rhs, this) {
             Ok(Some(v)) => {
                 this.push(v);
                 Ok(())
@@ -231,7 +231,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         }
 
         // Next try regular addition
-        if let Some(v) = lhs.py_add(rhs, this.heap, this.interns)? {
+        if let Some(v) = lhs.py_add(rhs, this)? {
             this.push(v);
             return Ok(());
         }

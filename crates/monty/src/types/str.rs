@@ -51,15 +51,13 @@ impl Str {
     /// - `str()` with no args returns an empty string
     /// - `str(x)` converts x to its string representation using `py_str`
     pub fn init(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
-        let heap = &mut *vm.heap;
-        let interns = vm.interns;
-        let value = args.get_zero_one_arg("str", heap)?;
+        let value = args.get_zero_one_arg("str", vm.heap)?;
         match value {
             None => Ok(Value::InternString(StaticStrings::EmptyString.into())),
             Some(v) => {
-                defer_drop!(v, heap);
-                let s = v.py_str(heap, interns).into_owned();
-                allocate_string(s, heap)
+                defer_drop!(v, vm);
+                let s = v.py_str(vm).into_owned();
+                allocate_string(s, vm.heap)
             }
         }
     }
@@ -223,30 +221,25 @@ impl PyTrait for Str {
         Some(self.0.chars().count())
     }
 
-    fn py_getitem(&self, key: &Value, heap: &mut Heap<impl ResourceTracker>, _interns: &Interns) -> RunResult<Value> {
+    fn py_getitem(&self, key: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Value> {
         // Check for slice first (Value::Ref pointing to HeapData::Slice)
         if let Value::Ref(id) = key
-            && let HeapData::Slice(slice) = heap.get(*id)
+            && let HeapData::Slice(slice) = vm.heap.get(*id)
         {
             // Clone the slice to release the borrow on heap before calling getitem_slice
             let slice = slice.clone();
-            return self.getitem_slice(&slice, heap);
+            return self.getitem_slice(&slice, vm.heap);
         }
 
         // Extract integer index, accepting Int, Bool (True=1, False=0), and LongInt
-        let index = key.as_index(heap, Type::Str)?;
+        let index = key.as_index(vm.heap, Type::Str)?;
 
         // Use single-pass indexing to avoid Vec<char> allocation
         let c = get_char_at_index(&self.0, index).ok_or_else(ExcType::str_index_error)?;
-        Ok(allocate_char(c, heap)?)
+        Ok(allocate_char(c, vm.heap)?)
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, _vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
         Ok(self.0 == other.0)
     }
 
@@ -262,51 +255,48 @@ impl PyTrait for Str {
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        _heap: &Heap<impl ResourceTracker>,
+        _vm: &VM<'_, '_, impl ResourceTracker>,
         _heap_ids: &mut AHashSet<HeapId>,
-        _interns: &Interns,
     ) -> fmt::Result {
         string_repr_fmt(&self.0, f)
     }
 
-    fn py_str(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> Cow<'static, str> {
+    fn py_str(&self, _vm: &VM<'_, '_, impl ResourceTracker>) -> Cow<'static, str> {
         self.0.clone().into()
     }
 
     fn py_add(
         &self,
         other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        _interns: &Interns,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> Result<Option<Value>, crate::resource::ResourceError> {
         let result = format!("{}{}", self.0, other.0);
-        let id = heap.allocate(HeapData::Str(result.into()))?;
+        let id = vm.heap.allocate(HeapData::Str(result.into()))?;
         Ok(Some(Value::Ref(id)))
     }
 
     fn py_iadd(
         &mut self,
         other: Value,
-        heap: &mut Heap<impl ResourceTracker>,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
         self_id: Option<HeapId>,
-        interns: &Interns,
     ) -> Result<bool, crate::resource::ResourceError> {
         match &other {
             Value::Ref(other_id) => {
                 if Some(*other_id) == self_id {
                     let rhs = self.0.clone();
                     self.0.push_str(&rhs);
-                } else if let HeapData::Str(rhs) = heap.get(*other_id) {
+                } else if let HeapData::Str(rhs) = vm.heap.get(*other_id) {
                     self.0.push_str(rhs.as_str());
                 } else {
                     return Ok(false);
                 }
                 // Drop the other value - we've consumed it
-                other.drop_with_heap(heap);
+                other.drop_with_heap(vm);
                 Ok(true)
             }
             Value::InternString(string_id) => {
-                self.0.push_str(interns.get_str(*string_id));
+                self.0.push_str(vm.interns.get_str(*string_id));
                 Ok(true)
             }
             _ => Ok(false),

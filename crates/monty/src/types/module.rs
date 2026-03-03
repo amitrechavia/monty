@@ -4,8 +4,8 @@ use crate::{
     args::ArgValues,
     bytecode::VM,
     exception_private::{ExcType, RunResult},
-    heap::{Heap, HeapGuard, HeapId},
-    intern::{Interns, StringId},
+    heap::{HeapGuard, HeapId},
+    intern::StringId,
     resource::ResourceTracker,
     types::{AttrCallResult, Dict, PyTrait},
     value::{EitherStr, Value},
@@ -56,35 +56,24 @@ impl Module {
     /// # Panics
     ///
     /// Panics if the attribute name string has not been pre-interned.
-    pub fn set_attr(
-        &mut self,
-        name: impl Into<StringId>,
-        value: Value,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) {
+    pub fn set_attr(&mut self, name: impl Into<StringId>, value: Value, vm: &mut VM<'_, '_, impl ResourceTracker>) {
         let key = Value::InternString(name.into());
         // Unwrap is safe because InternString keys are always hashable
-        self.attrs.set(key, value, heap, interns).unwrap();
+        self.attrs.set(key, value, vm).unwrap();
     }
 
     /// Looks up an attribute by name in the module's attribute dictionary.
     ///
     /// Returns `Some(value)` if the attribute exists, `None` otherwise.
     /// The returned value is cloned with proper refcount handling.
-    pub fn get_attr(
-        &self,
-        attr_value: &Value,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Option<Value> {
+    pub fn get_attr(&self, attr_value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Option<Value> {
         // Dict::get returns Result because of hash computation, but InternString keys
         // are always hashable, so unwrap is safe here.
         self.attrs
-            .get(attr_value, heap, interns)
+            .get(attr_value, vm)
             .ok()
             .flatten()
-            .map(|v| v.clone_with_heap(heap))
+            .map(|v| v.clone_with_heap(vm.heap))
     }
 
     /// Returns whether this module has any heap references in its attributes.
@@ -102,19 +91,14 @@ impl Module {
     /// Returns the attribute value if found, or `None` if the attribute doesn't exist.
     /// For `Property` values, invokes the property getter rather than returning
     /// the Property itself - this implements Python's descriptor protocol.
-    pub fn py_getattr(
-        &self,
-        attr: &EitherStr,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Option<AttrCallResult> {
-        let value = self.attrs.get_by_str(attr.as_str(interns), heap, interns)?;
+    pub fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Option<AttrCallResult> {
+        let value = self.attrs.get_by_str(attr.as_str(vm.interns), vm)?;
 
         // If the value is a Property, invoke its getter to compute the actual value
         if let Value::Property(prop) = *value {
             Some(prop.get())
         } else {
-            Some(AttrCallResult::Value(value.clone_with_heap(heap)))
+            Some(AttrCallResult::Value(value.clone_with_heap(vm.heap)))
         }
     }
 
@@ -132,9 +116,8 @@ impl Module {
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<AttrCallResult> {
-        let heap = &mut *vm.heap;
-        let interns = vm.interns;
-        let mut args_guard = HeapGuard::new(args, heap);
+        let mut args_guard = HeapGuard::new(args, vm);
+        let interns = args_guard.heap().interns;
 
         let attr_key = match attr {
             EitherStr::Interned(id) => Value::InternString(*id),
@@ -144,10 +127,10 @@ impl Module {
             }
         };
 
-        match self.get_attr(&attr_key, args_guard.heap(), interns) {
+        match self.get_attr(&attr_key, args_guard.heap()) {
             Some(Value::ModuleFunction(mf)) => {
-                let (args, heap) = args_guard.into_parts();
-                mf.call(heap, args)
+                let args = args_guard.into_inner();
+                mf.call(vm.heap, args)
             }
             Some(func) => {
                 // Found attribute but it's not callable
@@ -156,7 +139,7 @@ impl Module {
             }
             None => Err(ExcType::attribute_error_module(
                 interns.get_str(self.name),
-                attr.as_str(vm.interns),
+                attr.as_str(args_guard.heap().interns),
             )),
         }
     }

@@ -192,12 +192,7 @@ impl PyTrait for Slice {
         None
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, _vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
         Ok(self.start == other.start && self.stop == other.stop && self.step == other.step)
     }
 
@@ -209,9 +204,8 @@ impl PyTrait for Slice {
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        _heap: &Heap<impl ResourceTracker>,
+        _vm: &VM<'_, '_, impl ResourceTracker>,
         _heap_ids: &mut AHashSet<HeapId>,
-        _interns: &Interns,
     ) -> std::fmt::Result {
         f.write_str("slice(")?;
         format_option_i64(f, self.start)?;
@@ -229,8 +223,7 @@ impl PyTrait for Slice {
     fn py_getattr(
         &self,
         attr: &EitherStr,
-        _heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> RunResult<Option<AttrCallResult>> {
         // Fast path: interned strings can be matched by ID without string comparison
         if let Some(ss) = attr.static_string() {
@@ -242,7 +235,7 @@ impl PyTrait for Slice {
             };
         }
         // Slow path: heap-allocated strings need string comparison
-        match attr.as_str(interns) {
+        match attr.as_str(vm.interns) {
             "start" => Ok(Some(AttrCallResult::Value(option_i64_to_value(self.start)))),
             "stop" => Ok(Some(AttrCallResult::Value(option_i64_to_value(self.stop)))),
             "step" => Ok(Some(AttrCallResult::Value(option_i64_to_value(self.step)))),

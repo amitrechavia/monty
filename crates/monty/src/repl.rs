@@ -152,7 +152,7 @@ fn frame_exit_to_object(
         FrameExit::ExternalCall {
             function_name, args, ..
         } => {
-            args.drop_with_heap(heap);
+            args.drop_with_heap(vm);
             let function_name = function_name.as_str(interns);
             Err(ExcType::not_implemented(format!(
                 "External function '{function_name}' not implemented with standard execution"
@@ -160,15 +160,15 @@ fn frame_exit_to_object(
             .into())
         }
         FrameExit::OsCall { function, args, .. } => {
-            args.drop_with_heap(heap);
+            args.drop_with_heap(vm);
             Err(ExcType::not_implemented(format!(
                 "OS function '{function}' not implemented with standard execution"
             ))
             .into())
         }
         FrameExit::MethodCall { method_name, args, .. } => {
-            args.drop_with_heap(heap);
-            let name = method_name.as_str(interns);
+            args.drop_with_heap(vm);
+            let name = method_name.as_str(vm.interns);
             Err(
                 ExcType::not_implemented(format!("Method call '{name}' not implemented with standard execution"))
                     .into(),
@@ -298,10 +298,10 @@ impl<T: ResourceTracker> MontyRepl<T> {
             frame_exit_result = vm.resume_with_exception(err.into());
         }
 
-        vm.cleanup();
-
-        let output = frame_exit_to_object(frame_exit_result, &mut heap, &executor.interns)
+        let output = frame_exit_to_object(frame_exit_result, &mut vm)
             .map_err(|e| e.into_python_exception(&executor.interns, &executor.code))?;
+
+        vm.cleanup();
 
         let repl = Self {
             script_name: script_name.to_owned(),

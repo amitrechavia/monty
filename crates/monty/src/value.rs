@@ -160,12 +160,7 @@ impl PyTrait for Value {
         }
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
         match (self, other) {
             (Self::Undefined, _) => Ok(false),
             (_, Self::Undefined) => Ok(false),
@@ -182,7 +177,7 @@ impl PyTrait for Value {
 
             // Int == LongInt comparison
             (Self::Int(a), Self::Ref(id)) => {
-                if let HeapData::LongInt(li) = heap.get(*id) {
+                if let HeapData::LongInt(li) = vm.heap.get(*id) {
                     Ok(BigInt::from(*a) == *li.inner())
                 } else {
                     Ok(false)
@@ -190,7 +185,7 @@ impl PyTrait for Value {
             }
             // LongInt == Int comparison
             (Self::Ref(id), Self::Int(b)) => {
-                if let HeapData::LongInt(li) = heap.get(*id) {
+                if let HeapData::LongInt(li) = vm.heap.get(*id) {
                     Ok(*li.inner() == BigInt::from(*b))
                 } else {
                     Ok(false)
@@ -201,15 +196,15 @@ impl PyTrait for Value {
             (Self::InternString(s1), Self::InternString(s2)) => Ok(s1 == s2),
             // for strings we need to account for the fact they might be either interned or not
             (Self::InternString(string_id), Self::Ref(id2)) => {
-                if let HeapData::Str(s2) = heap.get(*id2) {
-                    Ok(interns.get_str(*string_id) == s2.as_str())
+                if let HeapData::Str(s2) = vm.heap.get(*id2) {
+                    Ok(vm.interns.get_str(*string_id) == s2.as_str())
                 } else {
                     Ok(false)
                 }
             }
             (Self::Ref(id1), Self::InternString(string_id)) => {
-                if let HeapData::Str(s1) = heap.get(*id1) {
-                    Ok(s1.as_str() == interns.get_str(*string_id))
+                if let HeapData::Str(s1) = vm.heap.get(*id1) {
+                    Ok(s1.as_str() == vm.interns.get_str(*string_id))
                 } else {
                     Ok(false)
                 }
@@ -218,19 +213,19 @@ impl PyTrait for Value {
             // For interned bytes, compare by content (bytes are not deduplicated unlike interns)
             (Self::InternBytes(b1), Self::InternBytes(b2)) => {
                 // Fast path: same BytesId means same content
-                Ok(b1 == b2 || interns.get_bytes(*b1) == interns.get_bytes(*b2))
+                Ok(b1 == b2 || vm.interns.get_bytes(*b1) == vm.interns.get_bytes(*b2))
             }
             // same for bytes
             (Self::InternBytes(bytes_id), Self::Ref(id2)) => {
-                if let HeapData::Bytes(b2) = heap.get(*id2) {
-                    Ok(interns.get_bytes(*bytes_id) == b2.as_slice())
+                if let HeapData::Bytes(b2) = vm.heap.get(*id2) {
+                    Ok(vm.interns.get_bytes(*bytes_id) == b2.as_slice())
                 } else {
                     Ok(false)
                 }
             }
             (Self::Ref(id1), Self::InternBytes(bytes_id)) => {
-                if let HeapData::Bytes(b1) = heap.get(*id1) {
-                    Ok(b1.as_slice() == interns.get_bytes(*bytes_id))
+                if let HeapData::Bytes(b1) = vm.heap.get(*id1) {
+                    Ok(b1.as_slice() == vm.interns.get_bytes(*bytes_id))
                 } else {
                     Ok(false)
                 }
@@ -241,7 +236,7 @@ impl PyTrait for Value {
                     return Ok(true);
                 }
                 // Need to use with_two for proper borrow management
-                heap.with_two(*id1, *id2, |heap, left, right| left.py_eq(right, heap, interns))
+                Heap::with_two(vm, *id1, *id2, |vm, left, right| left.py_eq(right, vm))
             }
 
             // Builtins equality - just check the enums are equal
@@ -358,9 +353,8 @@ impl PyTrait for Value {
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        heap: &Heap<impl ResourceTracker>,
+        vm: &VM<'_, '_, impl ResourceTracker>,
         heap_ids: &mut AHashSet<HeapId>,
-        interns: &Interns,
     ) -> std::fmt::Result {
         match self {
             Self::Undefined => f.write_str("Undefined"),
@@ -369,7 +363,7 @@ impl PyTrait for Value {
             Self::Bool(true) => f.write_str("True"),
             Self::Bool(false) => f.write_str("False"),
             Self::Int(v) => write!(f, "{v}"),
-            Self::InternLongInt(long_int_id) => write!(f, "{}", interns.get_long_int(*long_int_id)),
+            Self::InternLongInt(long_int_id) => write!(f, "{}", vm.interns.get_long_int(*long_int_id)),
             Self::Float(v) => {
                 let s = v.to_string();
                 if s.contains('.') {
@@ -380,19 +374,19 @@ impl PyTrait for Value {
             }
             Self::Builtin(b) => b.py_repr_fmt(f),
             Self::ModuleFunction(mf) => mf.py_repr_fmt(f, self.id()),
-            Self::DefFunction(f_id) => interns.get_function(*f_id).py_repr_fmt(f, interns, self.id()),
+            Self::DefFunction(f_id) => vm.interns.get_function(*f_id).py_repr_fmt(f, vm.interns, self.id()),
             Self::ExtFunction(name_id) => {
-                write!(f, "<function '{}' external>", interns.get_str(*name_id))
+                write!(f, "<function '{}' external>", vm.interns.get_str(*name_id))
             }
-            Self::InternString(string_id) => string_repr_fmt(interns.get_str(*string_id), f),
-            Self::InternBytes(bytes_id) => bytes_repr_fmt(interns.get_bytes(*bytes_id), f),
+            Self::InternString(string_id) => string_repr_fmt(vm.interns.get_str(*string_id), f),
+            Self::InternBytes(bytes_id) => bytes_repr_fmt(vm.interns.get_bytes(*bytes_id), f),
             Self::Marker(m) => m.py_repr_fmt(f),
             Self::Property(p) => write!(f, "<property {p:?}>"),
             Self::ExternalFuture(call_id) => write!(f, "<coroutine external_future({})>", call_id.raw()),
             Self::Ref(id) => {
                 if heap_ids.contains(id) {
                     // Cycle detected - write type-specific placeholder following Python semantics
-                    match heap.get(*id) {
+                    match vm.heap.get(*id) {
                         HeapData::List(_) => f.write_str("[...]"),
                         HeapData::Tuple(_) => f.write_str("(...)"),
                         HeapData::Dict(_) => f.write_str("{...}"),
@@ -401,7 +395,7 @@ impl PyTrait for Value {
                     }
                 } else {
                     heap_ids.insert(*id);
-                    let result = heap.get(*id).py_repr_fmt(f, heap, heap_ids, interns);
+                    let result = vm.heap.get(*id).py_repr_fmt(f, vm, heap_ids);
                     heap_ids.remove(id);
                     result
                 }
@@ -411,20 +405,21 @@ impl PyTrait for Value {
         }
     }
 
-    fn py_str(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Cow<'static, str> {
+    fn py_str(&self, vm: &VM<'_, '_, impl ResourceTracker>) -> Cow<'static, str> {
         match self {
-            Self::InternString(string_id) => interns.get_str(*string_id).to_owned().into(),
-            Self::Ref(id) => heap.get(*id).py_str(heap, interns),
-            _ => self.py_repr(heap, interns),
+            Self::InternString(string_id) => vm.interns.get_str(*string_id).to_owned().into(),
+            Self::Ref(id) => vm.heap.get(*id).py_str(vm),
+            _ => self.py_repr(vm),
         }
     }
 
     fn py_add(
         &self,
         other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> Result<Option<Value>, crate::resource::ResourceError> {
+        let heap = &mut *vm.heap;
+        let interns = vm.interns;
         match (self, other) {
             // Int + Int with overflow detection
             (Self::Int(a), Self::Int(b)) => {
@@ -450,7 +445,7 @@ impl PyTrait for Value {
             (Self::Int(a), Self::Float(b)) => Ok(Some(Self::Float(*a as f64 + b))),
             (Self::Float(a), Self::Int(b)) => Ok(Some(Self::Float(a + *b as f64))),
             (Self::Ref(id1), Self::Ref(id2)) => {
-                heap.with_two(*id1, *id2, |heap, left, right| left.py_add(right, heap, interns))
+                Heap::with_two(vm, *id1, *id2, |vm, left, right| left.py_add(right, vm))
             }
             (Self::InternString(s1), Self::InternString(s2)) => {
                 let concat = format!("{}{}", interns.get_str(*s1), interns.get_str(*s2));
@@ -511,8 +506,9 @@ impl PyTrait for Value {
     fn py_sub(
         &self,
         other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> Result<Option<Self>, crate::resource::ResourceError> {
+        let heap = &mut *vm.heap;
         match (self, other) {
             // Int - Int with overflow detection
             (Self::Int(a), Self::Int(b)) => {
@@ -543,7 +539,9 @@ impl PyTrait for Value {
                 }
             }
             // LongInt - LongInt
-            (Self::Ref(id1), Self::Ref(id2)) => heap.with_two(*id1, *id2, |heap, left, right| left.py_sub(right, heap)),
+            (Self::Ref(id1), Self::Ref(id2)) => {
+                Heap::with_two(vm, *id1, *id2, |vm, left, right| left.py_sub(right, vm))
+            }
             // Float - Float
             (Self::Float(a), Self::Float(b)) => Ok(Some(Self::Float(a - b))),
             // Int - Float and Float - Int
@@ -553,7 +551,8 @@ impl PyTrait for Value {
         }
     }
 
-    fn py_mod(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>) -> RunResult<Option<Self>> {
+    fn py_mod(&self, other: &Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Option<Self>> {
+        let heap = &mut *vm.heap;
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => {
                 if *b == 0 {
@@ -596,7 +595,9 @@ impl PyTrait for Value {
                 Ok(Some(LongInt::new(bi).into_value(heap)?))
             }
             // LongInt % LongInt
-            (Self::Ref(id1), Self::Ref(id2)) => heap.with_two(*id1, *id2, |heap, left, right| left.py_mod(right, heap)),
+            (Self::Ref(id1), Self::Ref(id2)) => {
+                Heap::with_two(vm, *id1, *id2, |vm, left, right| left.py_mod(right, vm))
+            }
             (Self::Float(v1), Self::Float(v2)) => {
                 if *v2 == 0.0 {
                     Err(ExcType::zero_division().into())
@@ -644,10 +645,11 @@ impl PyTrait for Value {
     fn py_iadd(
         &mut self,
         other: Self,
-        heap: &mut Heap<impl ResourceTracker>,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
         _self_id: Option<HeapId>,
-        interns: &Interns,
     ) -> Result<bool, crate::resource::ResourceError> {
+        let heap = &mut *vm.heap;
+        let interns = vm.interns;
         match (&self, &other) {
             (Self::Int(v1), Self::Int(v2)) => {
                 if let Some(result) = v1.checked_add(*v2) {
@@ -722,7 +724,7 @@ impl PyTrait for Value {
                 }
             }
             (Self::Ref(id), Self::Ref(_)) => {
-                heap.with_entry_mut(*id, |heap, mut data| data.py_iadd(other, heap, Some(*id), interns))
+                Heap::with_entry_mut(vm, *id, |vm, mut data| data.py_iadd(other, vm, Some(*id)))
             }
             _ => {
                 // Drop other if it's a Ref (ensure proper refcounting for unsupported type combinations)
@@ -1310,25 +1312,25 @@ impl PyTrait for Value {
         }
     }
 
-    fn py_getitem(&self, key: &Self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Self> {
+    fn py_getitem(&self, key: &Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Self> {
         match self {
             Self::Ref(id) => {
                 // Need to take entry out to allow mutable heap access
                 let id = *id;
-                heap.with_entry_mut(id, |heap, data| data.py_getitem(key, heap, interns))
+                Heap::with_entry_mut(vm, id, |vm, data| data.py_getitem(key, vm))
             }
             Self::InternString(string_id) => {
                 // Check for slice first
                 if let Self::Ref(key_id) = key
-                    && let HeapData::Slice(slice_obj) = heap.get(*key_id)
+                    && let HeapData::Slice(slice_obj) = vm.heap.get(*key_id)
                 {
-                    let s = interns.get_str(*string_id);
+                    let s = vm.interns.get_str(*string_id);
                     let char_count = s.chars().count();
                     let (start, stop, step) = slice_obj
                         .indices(char_count)
                         .map_err(|()| ExcType::value_error_slice_step_zero())?;
                     let result_str = get_str_slice(s, start, stop, step);
-                    let heap_id = heap.allocate(HeapData::Str(Str::from(result_str)))?;
+                    let heap_id = vm.heap.allocate(HeapData::Str(Str::from(result_str)))?;
                     return Ok(Self::Ref(heap_id));
                 }
 
@@ -1336,24 +1338,26 @@ impl PyTrait for Value {
                 let index = match key {
                     Self::Int(i) => *i,
                     Self::Bool(b) => i64::from(*b),
-                    _ => return Err(ExcType::type_error_indices(Type::Str, key.py_type(heap))),
+                    _ => return Err(ExcType::type_error_indices(Type::Str, key.py_type(vm.heap))),
                 };
 
-                let s = interns.get_str(*string_id);
+                let s = vm.interns.get_str(*string_id);
                 let c = get_char_at_index(s, index).ok_or_else(ExcType::str_index_error)?;
-                Ok(allocate_char(c, heap)?)
+                Ok(allocate_char(c, vm.heap)?)
             }
             Self::InternBytes(bytes_id) => {
                 // Check for slice first
                 if let Self::Ref(key_id) = key
-                    && let HeapData::Slice(slice_obj) = heap.get(*key_id)
+                    && let HeapData::Slice(slice_obj) = vm.heap.get(*key_id)
                 {
-                    let bytes = interns.get_bytes(*bytes_id);
+                    let bytes = vm.interns.get_bytes(*bytes_id);
                     let (start, stop, step) = slice_obj
                         .indices(bytes.len())
                         .map_err(|()| ExcType::value_error_slice_step_zero())?;
                     let result_bytes = get_bytes_slice(bytes, start, stop, step);
-                    let heap_id = heap.allocate(HeapData::Bytes(crate::types::Bytes::new(result_bytes)))?;
+                    let heap_id = vm
+                        .heap
+                        .allocate(HeapData::Bytes(crate::types::Bytes::new(result_bytes)))?;
                     return Ok(Self::Ref(heap_id));
                 }
 
@@ -1361,32 +1365,26 @@ impl PyTrait for Value {
                 let index = match key {
                     Self::Int(i) => *i,
                     Self::Bool(b) => i64::from(*b),
-                    _ => return Err(ExcType::type_error_indices(Type::Bytes, key.py_type(heap))),
+                    _ => return Err(ExcType::type_error_indices(Type::Bytes, key.py_type(vm.heap))),
                 };
 
-                let bytes = interns.get_bytes(*bytes_id);
+                let bytes = vm.interns.get_bytes(*bytes_id);
                 let byte = get_byte_at_index(bytes, index).ok_or_else(ExcType::bytes_index_error)?;
                 Ok(Self::Int(i64::from(byte)))
             }
-            _ => Err(ExcType::type_error_not_sub(self.py_type(heap))),
+            _ => Err(ExcType::type_error_not_sub(self.py_type(vm.heap))),
         }
     }
 
-    fn py_setitem(
-        &mut self,
-        key: Self,
-        value: Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> RunResult<()> {
+    fn py_setitem(&mut self, key: Self, value: Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<()> {
         match self {
             Self::Ref(id) => {
                 let id = *id;
-                heap.with_entry_mut(id, |heap, mut data| data.py_setitem(key, value, heap, interns))
+                Heap::with_entry_mut(vm, id, |vm, mut data| data.py_setitem(key, value, vm))
             }
             _ => Err(ExcType::type_error(format!(
                 "'{}' object does not support item assignment",
-                self.py_type(heap)
+                self.py_type(vm.heap)
             ))),
         }
     }
@@ -1483,28 +1481,24 @@ impl Value {
     ///
     /// The `interns` parameter is needed for InternString/InternBytes to look up
     /// their actual content and hash it consistently with equivalent heap Str/Bytes.
-    pub fn py_hash(
-        &self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Result<Option<u64>, ResourceError> {
+    pub fn py_hash<T: ResourceTracker>(&self, vm: &mut VM<'_, '_, T>) -> Result<Option<u64>, ResourceError> {
         // strings bytes bigints and heap allocated values have their own hashing logic
         match self {
             // Hash just the actual string or bytes content for consistency with heap Str/Bytes
             // hence we don't include the discriminant
             Self::InternString(string_id) => {
                 let mut hasher = DefaultHasher::new();
-                interns.get_str(*string_id).hash(&mut hasher);
+                vm.interns.get_str(*string_id).hash(&mut hasher);
                 return Ok(Some(hasher.finish()));
             }
             Self::InternBytes(bytes_id) => {
                 let mut hasher = DefaultHasher::new();
-                interns.get_bytes(*bytes_id).hash(&mut hasher);
+                vm.interns.get_bytes(*bytes_id).hash(&mut hasher);
                 return Ok(Some(hasher.finish()));
             }
             // Hash BigInt consistently with LongInt (using sign and bytes for large values)
             Self::InternLongInt(long_int_id) => {
-                let bi = interns.get_long_int(*long_int_id);
+                let bi = vm.interns.get_long_int(*long_int_id);
                 let mut hasher = DefaultHasher::new();
                 let (sign, bytes) = bi.to_bytes_le();
                 sign.hash(&mut hasher);
@@ -1512,7 +1506,7 @@ impl Value {
                 return Ok(Some(hasher.finish()));
             }
             // For heap-allocated values (includes Range and Exception), compute hash lazily and cache it
-            Self::Ref(id) => return heap.get_or_compute_hash(*id, interns),
+            Self::Ref(id) => return Heap::get_or_compute_hash(vm, *id),
             _ => {}
         }
 
@@ -1554,21 +1548,16 @@ impl Value {
     /// - Dict: key lookup
     /// - Set/FrozenSet: element lookup
     /// - Str: substring search
-    pub fn py_contains(
-        &self,
-        item: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> RunResult<bool> {
+    pub fn py_contains(&self, item: &Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<bool> {
         match self {
             Self::Ref(heap_id) => {
                 // Use with_entry_mut to temporarily take ownership of the container.
                 // This allows iterating over container elements while calling py_eq
-                // (which needs &mut Heap for comparing nested heap values).
-                heap.with_entry_mut(*heap_id, |heap, data| match data {
+                // (which needs &mut VM for comparing nested heap values).
+                Heap::with_entry_mut(vm, *heap_id, |vm, data| match data {
                     HeapDataMut::List(list) => {
                         for el in list.as_slice() {
-                            if item.py_eq(el, heap, interns)? {
+                            if item.py_eq(el, vm)? {
                                 return Ok(true);
                             }
                         }
@@ -1576,16 +1565,16 @@ impl Value {
                     }
                     HeapDataMut::Tuple(tuple) => {
                         for el in tuple.as_slice() {
-                            if item.py_eq(el, heap, interns)? {
+                            if item.py_eq(el, vm)? {
                                 return Ok(true);
                             }
                         }
                         Ok(false)
                     }
-                    HeapDataMut::Dict(dict) => dict.get(item, heap, interns).map(|m| m.is_some()),
-                    HeapDataMut::Set(set) => set.contains(item, heap, interns),
-                    HeapDataMut::FrozenSet(fset) => fset.contains(item, heap, interns),
-                    HeapDataMut::Str(s) => str_contains(s.as_str(), item, heap, interns),
+                    HeapDataMut::Dict(dict) => dict.get(item, vm).map(|m| m.is_some()),
+                    HeapDataMut::Set(set) => set.contains(item, vm),
+                    HeapDataMut::FrozenSet(fset) => fset.contains(item, vm),
+                    HeapDataMut::Str(s) => str_contains(s.as_str(), item, vm.heap, vm.interns),
                     HeapDataMut::Range(range) => {
                         // Range containment is O(1) - check bounds and step alignment
                         let n = match item {
@@ -1613,7 +1602,7 @@ impl Value {
                         Ok(range.contains(n))
                     }
                     other => {
-                        let type_name = other.py_type(heap);
+                        let type_name = other.py_type(vm.heap);
                         Err(ExcType::type_error(format!(
                             "argument of type '{type_name}' is not iterable"
                         )))
@@ -1621,11 +1610,11 @@ impl Value {
                 })
             }
             Self::InternString(string_id) => {
-                let container_str = interns.get_str(*string_id);
-                str_contains(container_str, item, heap, interns)
+                let container_str = vm.interns.get_str(*string_id);
+                str_contains(container_str, item, vm.heap, vm.interns)
             }
             _ => {
-                let type_name = self.py_type(heap);
+                let type_name = self.py_type(vm.heap);
                 Err(ExcType::type_error(format!(
                     "argument of type '{type_name}' is not iterable"
                 )))

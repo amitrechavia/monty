@@ -517,7 +517,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         let kwargs_values = if copied_kwargs.is_empty() {
             KwargsValues::Empty
         } else {
-            let kwargs_dict = Dict::from_pairs(copied_kwargs, this.heap, this.interns)?;
+            let kwargs_dict = Dict::from_pairs(copied_kwargs, this)?;
             KwargsValues::Dict(kwargs_dict)
         };
 
@@ -594,7 +594,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         let kwargs_values = if copied_kwargs.is_empty() {
             KwargsValues::Empty
         } else {
-            let kwargs_dict = Dict::from_pairs(copied_kwargs, this.heap, this.interns)?;
+            let kwargs_dict = Dict::from_pairs(copied_kwargs, this)?;
             KwargsValues::Dict(kwargs_dict)
         };
 

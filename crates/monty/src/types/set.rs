@@ -107,44 +107,27 @@ impl SetStorage {
     /// The caller transfers ownership of `value`. If the value is already in
     /// the set, it will be dropped.
     fn add(&mut self, value: Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<bool> {
-        self.add_heap_interns(value, vm.heap, vm.interns)
-    }
-
-    /// Adds an element to the set, transferring ownership.
-    ///
-    /// Returns `Ok(true)` if the element was added (not already present),
-    /// `Ok(false)` if the element was already in the set.
-    /// Returns `Err` if the element is unhashable.
-    ///
-    /// The caller transfers ownership of `value`. If the value is already in
-    /// the set, it will be dropped.
-    fn add_heap_interns(
-        &mut self,
-        value: Value,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> RunResult<bool> {
-        let hash = match value.py_hash(heap, interns) {
+        let hash = match value.py_hash(vm) {
             Ok(Some(h)) => h,
             Ok(None) => {
-                let err = ExcType::type_error_unhashable_set_element(value.py_type(heap));
-                value.drop_with_heap(heap);
+                let err = ExcType::type_error_unhashable_set_element(value.py_type(vm.heap));
+                value.drop_with_heap(vm);
                 return Err(err);
             }
             Err(e) => {
-                value.drop_with_heap(heap);
+                value.drop_with_heap(vm);
                 return Err(e.into());
             }
         };
 
         // Check if value already exists.
-        let existing = self.indices.find(hash, |&idx| {
-            value.py_eq(&self.entries[idx].value, heap, interns).unwrap_or(false)
-        });
+        let existing = self
+            .indices
+            .find(hash, |&idx| value.py_eq(&self.entries[idx].value, vm).unwrap_or(false));
 
         if existing.is_some() {
             // Value already in set, drop the new value
-            value.drop_with_heap(heap);
+            value.drop_with_heap(vm);
             Ok(false)
         } else {
             // Add new entry
@@ -159,14 +142,14 @@ impl SetStorage {
     ///
     /// Returns `Ok(true)` if the element was removed, `Ok(false)` if not found.
     /// Returns `Err` if the key is unhashable.
-    fn remove(&mut self, value: &Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<bool> {
+    fn remove(&mut self, value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<bool> {
         let hash = value
-            .py_hash(heap, interns)?
-            .ok_or_else(|| ExcType::type_error_unhashable_set_element(value.py_type(heap)))?;
+            .py_hash(vm)?
+            .ok_or_else(|| ExcType::type_error_unhashable_set_element(value.py_type(vm.heap)))?;
 
         let entry = self.indices.entry(
             hash,
-            |&idx| value.py_eq(&self.entries[idx].value, heap, interns).unwrap_or(false),
+            |&idx| value.py_eq(&self.entries[idx].value, vm).unwrap_or(false),
             |&idx| self.entries[idx].hash,
         );
 
@@ -183,7 +166,7 @@ impl SetStorage {
             }
 
             // Drop the removed value
-            removed_entry.value.drop_with_heap(heap);
+            removed_entry.value.drop_with_heap(vm);
             Ok(true)
         } else {
             Ok(false)
@@ -193,8 +176,8 @@ impl SetStorage {
     /// Removes an element from the set without raising an error if not found.
     ///
     /// Returns `Ok(())` always (unless the key is unhashable).
-    fn discard(&mut self, value: &Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<()> {
-        self.remove(value, heap, interns)?;
+    fn discard(&mut self, value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<()> {
+        self.remove(value, vm)?;
         Ok(())
     }
 
@@ -243,27 +226,15 @@ impl SetStorage {
 
     /// Checks if the set contains a value.
     pub fn contains(&self, value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<bool> {
-        self.contains_heap_interns(value, vm.heap, vm.interns)
-    }
-
-    /// Checks if the set contains a value.
-    pub fn contains_heap_interns(
-        &self,
-        value: &Value,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> RunResult<bool> {
         let hash = value
-            .py_hash(heap, interns)?
-            .ok_or_else(|| ExcType::type_error_unhashable_set_element(value.py_type(heap)))?;
+            .py_hash(vm)?
+            .ok_or_else(|| ExcType::type_error_unhashable_set_element(value.py_type(vm.heap)))?;
 
         // Set values are typically shallow (strings, ints, tuples of primitives),
         // so recursion errors are unlikely. If one occurs, treat it as "not equal".
         Ok(self
             .indices
-            .find(hash, |&idx| {
-                value.py_eq(&self.entries[idx].value, heap, interns).unwrap_or(false)
-            })
+            .find(hash, |&idx| value.py_eq(&self.entries[idx].value, vm).unwrap_or(false))
             .is_some())
     }
 
@@ -291,21 +262,16 @@ impl SetStorage {
     }
 
     /// Compares two sets for equality.
-    fn eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Result<bool, ResourceError> {
+    fn eq(&self, other: &Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
         if self.len() != other.len() {
             return Ok(false);
         }
 
-        let token = heap.incr_recursion_depth()?;
-        defer_drop!(token, heap);
+        let token = vm.heap.incr_recursion_depth()?;
+        defer_drop!(token, vm);
         // Check that every element in self is in other
         for entry in &self.entries {
-            if !matches!(other.contains_heap_interns(&entry.value, heap, interns), Ok(true)) {
+            if !matches!(other.contains(&entry.value, vm), Ok(true)) {
                 return Ok(false);
             }
         }
@@ -428,9 +394,8 @@ impl SetStorage {
     fn repr_fmt(
         &self,
         f: &mut impl Write,
-        heap: &Heap<impl ResourceTracker>,
+        vm: &VM<'_, '_, impl ResourceTracker>,
         heap_ids: &mut AHashSet<HeapId>,
-        interns: &Interns,
         type_name: &str,
     ) -> std::fmt::Result {
         if self.is_empty() {
@@ -438,10 +403,10 @@ impl SetStorage {
         }
 
         // Check depth limit before recursing
-        let Some(token) = heap.incr_recursion_depth_for_repr() else {
+        let Some(token) = vm.heap.incr_recursion_depth_for_repr() else {
             return f.write_str("{...}");
         };
-        crate::defer_drop_immutable_heap!(token, heap);
+        crate::defer_drop_immutable_heap!(token, vm);
 
         // frozenset needs type prefix: frozenset({...}), but set doesn't: {...}
         let needs_prefix = type_name != "set";
@@ -453,14 +418,14 @@ impl SetStorage {
         let mut first = true;
         for entry in &self.entries {
             if !first {
-                if heap.check_time().is_err() {
+                if vm.heap.check_time().is_err() {
                     f.write_str(", ...[timeout]")?;
                     break;
                 }
                 f.write_str(", ")?;
             }
             first = false;
-            entry.value.py_repr_fmt(f, heap, heap_ids, interns)?;
+            entry.value.py_repr_fmt(f, vm, heap_ids)?;
         }
         f.write_char('}')?;
 
@@ -527,31 +492,26 @@ impl Set {
     /// Adds an element to the set, transferring ownership.
     ///
     /// Returns `Ok(true)` if added, `Ok(false)` if already present.
-    pub fn add(&mut self, value: Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<bool> {
-        self.0.add_heap_interns(value, heap, interns)
+    pub fn add(&mut self, value: Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<bool> {
+        self.0.add(value, vm)
     }
 
     /// Removes an element from the set.
     ///
     /// Returns `Err(KeyError)` if the element is not present.
-    pub fn remove(&mut self, value: &Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<()> {
-        if self.0.remove(value, heap, interns)? {
+    pub fn remove(&mut self, value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<()> {
+        if self.0.remove(value, vm)? {
             Ok(())
         } else {
-            Err(ExcType::key_error(value, heap, interns))
+            Err(ExcType::key_error(value, vm))
         }
     }
 
     /// Removes an element from the set if present.
     ///
     /// Does not raise an error if the element is not found.
-    pub fn discard(
-        &mut self,
-        value: &Value,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> RunResult<()> {
-        self.0.discard(value, heap, interns)
+    pub fn discard(&mut self, value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<()> {
+        self.0.discard(value, vm)
     }
 
     /// Removes and returns an arbitrary element from the set.
@@ -573,8 +533,8 @@ impl Set {
     }
 
     /// Checks if the set contains a value.
-    pub fn contains(&self, value: &Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<bool> {
-        self.0.contains_heap_interns(value, heap, interns)
+    pub fn contains(&self, value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<bool> {
+        self.0.contains(value, vm)
     }
 
     /// Returns the internal storage (for set operations between Set and FrozenSet).
@@ -604,7 +564,7 @@ impl Set {
         defer_drop_mut!(iter, vm);
         let mut set = Self::with_capacity(iter.size_hint(vm.heap));
         while let Some(item) = iter.for_next(vm)? {
-            set.add(item, vm.heap, vm.interns)?;
+            set.add(item, vm)?;
         }
         Ok(set)
     }
@@ -651,13 +611,8 @@ impl PyTrait for Set {
         Some(self.len())
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Result<bool, ResourceError> {
-        self.0.eq(&other.0, heap, interns)
+    fn py_eq(&self, other: &Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+        self.0.eq(&other.0, vm)
     }
 
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
@@ -671,11 +626,10 @@ impl PyTrait for Set {
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        heap: &Heap<impl ResourceTracker>,
+        vm: &VM<'_, '_, impl ResourceTracker>,
         heap_ids: &mut AHashSet<HeapId>,
-        interns: &Interns,
     ) -> std::fmt::Result {
-        self.0.repr_fmt(f, heap, heap_ids, interns, "set")
+        self.0.repr_fmt(f, vm, heap_ids, "set")
     }
 
     fn py_call_attr(
@@ -689,20 +643,20 @@ impl PyTrait for Set {
         let interns = vm.interns;
         let value = match attr.static_string() {
             Some(StaticStrings::Add) => {
-                let value = args.get_one_arg("set.add", heap)?;
-                self.add(value, heap, interns)?;
+                let value = args.get_one_arg("set.add", vm.heap)?;
+                self.add(value, vm)?;
                 Ok(Value::None)
             }
             Some(StaticStrings::Remove) => {
-                let value = args.get_one_arg("set.remove", heap)?;
-                defer_drop!(value, heap);
-                self.remove(value, heap, interns)?;
+                let value = args.get_one_arg("set.remove", vm.heap)?;
+                defer_drop!(value, vm);
+                self.remove(value, vm)?;
                 Ok(Value::None)
             }
             Some(StaticStrings::Discard) => {
-                let value = args.get_one_arg("set.discard", heap)?;
-                defer_drop!(value, heap);
-                self.discard(value, heap, interns)?;
+                let value = args.get_one_arg("set.discard", vm.heap)?;
+                defer_drop!(value, vm);
+                self.discard(value, vm)?;
                 Ok(Value::None)
             }
             Some(StaticStrings::Pop) => {
@@ -775,7 +729,7 @@ impl PyTrait for Set {
     fn py_sub(
         &self,
         _other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
+        _vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> Result<Option<Value>, crate::resource::ResourceError> {
         // This is called from heap.rs with two Sets
         // We need interns for contains check, but py_sub doesn't have it
@@ -789,21 +743,20 @@ impl PyTrait for Set {
 impl Set {
     /// Updates this set with elements from an iterable value.
     fn update_from_value(&mut self, other: Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<()> {
-        let heap = &mut *vm.heap;
         // Try to get entries from a Set/FrozenSet directly
         let entries_opt = match &other {
-            Value::Ref(id) => match heap.get(*id) {
-                HeapData::Set(other_set) => Some(other_set.0.clone_entries(heap)),
-                HeapData::FrozenSet(other_set) => Some(other_set.0.clone_entries(heap)),
+            Value::Ref(id) => match vm.heap.get(*id) {
+                HeapData::Set(other_set) => Some(other_set.0.clone_entries(vm.heap)),
+                HeapData::FrozenSet(other_set) => Some(other_set.0.clone_entries(vm.heap)),
                 _ => None,
             },
             _ => None,
         };
 
         if let Some(entries) = entries_opt {
-            other.drop_with_heap(heap);
+            other.drop_with_heap(vm);
             for (value, _hash) in entries {
-                self.add(value, heap, vm.interns)?;
+                self.add(value, vm)?;
             }
             return Ok(());
         }
@@ -997,25 +950,21 @@ impl FrozenSet {
     }
 
     /// Checks if the frozenset contains a value.
-    pub fn contains(&self, value: &Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<bool> {
-        self.0.contains_heap_interns(value, heap, interns)
+    pub fn contains(&self, value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<bool> {
+        self.0.contains(value, vm)
     }
 
     /// Computes the hash of this frozenset.
     ///
     /// The hash is the XOR of all element hashes, making it order-independent.
     /// Checks recursion depth before recursing into element hashes.
-    pub fn compute_hash(
-        &self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Result<Option<u64>, ResourceError> {
-        let token = heap.incr_recursion_depth()?;
-        defer_drop!(token, heap);
+    pub fn compute_hash(&self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<Option<u64>, ResourceError> {
+        let token = vm.heap.incr_recursion_depth()?;
+        defer_drop!(token, vm);
         let mut hash: u64 = 0;
         for entry in &self.0.entries {
             // All elements must be hashable (enforced at construction)
-            match entry.value.py_hash(heap, interns)? {
+            match entry.value.py_hash(vm)? {
                 Some(h) => hash ^= h,
                 None => return Ok(None),
             }
@@ -1087,13 +1036,8 @@ impl PyTrait for FrozenSet {
         Some(self.len())
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Result<bool, ResourceError> {
-        self.0.eq(&other.0, heap, interns)
+    fn py_eq(&self, other: &Self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+        self.0.eq(&other.0, vm)
     }
 
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
@@ -1107,11 +1051,10 @@ impl PyTrait for FrozenSet {
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        heap: &Heap<impl ResourceTracker>,
+        vm: &VM<'_, '_, impl ResourceTracker>,
         heap_ids: &mut AHashSet<HeapId>,
-        interns: &Interns,
     ) -> std::fmt::Result {
-        self.0.repr_fmt(f, heap, heap_ids, interns, "frozenset")
+        self.0.repr_fmt(f, vm, heap_ids, "frozenset")
     }
 
     fn py_call_attr(
@@ -1188,7 +1131,7 @@ impl PyTrait for FrozenSet {
     fn py_sub(
         &self,
         _other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
+        _vm: &mut VM<'_, '_, impl ResourceTracker>,
     ) -> Result<Option<Value>, crate::resource::ResourceError> {
         // Same limitation as Set - needs interns
         Ok(None)

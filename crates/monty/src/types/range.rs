@@ -213,18 +213,18 @@ impl PyTrait for Range {
         Some(self.len())
     }
 
-    fn py_getitem(&self, key: &Value, heap: &mut Heap<impl ResourceTracker>, _interns: &Interns) -> RunResult<Value> {
+    fn py_getitem(&self, key: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Value> {
         // Check for slice first (Value::Ref pointing to HeapData::Slice)
         if let Value::Ref(id) = key
-            && let HeapData::Slice(slice) = heap.get(*id)
+            && let HeapData::Slice(slice) = vm.heap.get(*id)
         {
             // Clone the slice to release the borrow on heap before calling getitem_slice
             let slice = slice.clone();
-            return self.getitem_slice(&slice, heap);
+            return self.getitem_slice(&slice, vm.heap);
         }
 
         // Extract integer index, accepting Int, Bool (True=1, False=0), and LongInt
-        let index = key.as_index(heap, Type::Range)?;
+        let index = key.as_index(vm.heap, Type::Range)?;
 
         // Get range length for normalization
         let len = i64::try_from(self.len()).expect("range length exceeds i64::MAX");
@@ -244,12 +244,7 @@ impl PyTrait for Range {
         Ok(Value::Int(offset))
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, _vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
         // Compare ranges by their actual sequences, not parameters.
         // Two ranges are equal if they produce the same elements.
         let len1 = self.len();
@@ -271,9 +266,8 @@ impl PyTrait for Range {
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        _heap: &Heap<impl ResourceTracker>,
+        _vm: &VM<'_, '_, impl ResourceTracker>,
         _heap_ids: &mut AHashSet<HeapId>,
-        _interns: &Interns,
     ) -> std::fmt::Result {
         if self.step == 1 {
             write!(f, "range({}, {})", self.start, self.stop)

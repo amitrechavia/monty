@@ -263,34 +263,29 @@ impl PyTrait for Bytes {
         Some(self.0.len())
     }
 
-    fn py_getitem(&self, key: &Value, heap: &mut Heap<impl ResourceTracker>, _interns: &Interns) -> RunResult<Value> {
+    fn py_getitem(&self, key: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Value> {
         // Check for slice first (Value::Ref pointing to HeapData::Slice)
         if let Value::Ref(id) = key
-            && let HeapData::Slice(slice) = heap.get(*id)
+            && let HeapData::Slice(slice) = vm.heap.get(*id)
         {
             let (start, stop, step) = slice
                 .indices(self.0.len())
                 .map_err(|()| ExcType::value_error_slice_step_zero())?;
 
             let sliced_bytes = get_bytes_slice(&self.0, start, stop, step);
-            let heap_id = heap.allocate(HeapData::Bytes(Self::new(sliced_bytes)))?;
+            let heap_id = vm.heap.allocate(HeapData::Bytes(Self::new(sliced_bytes)))?;
             return Ok(Value::Ref(heap_id));
         }
 
         // Extract integer index, accepting Int, Bool (True=1, False=0), and LongInt
-        let index = key.as_index(heap, Type::Bytes)?;
+        let index = key.as_index(vm.heap, Type::Bytes)?;
 
         // Use helper for byte indexing
         let byte = get_byte_at_index(&self.0, index).ok_or_else(ExcType::bytes_index_error)?;
         Ok(Value::Int(i64::from(byte)))
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, _vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
         Ok(self.0 == other.0)
     }
 
@@ -306,9 +301,8 @@ impl PyTrait for Bytes {
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        _heap: &Heap<impl ResourceTracker>,
+        _vm: &VM<'_, '_, impl ResourceTracker>,
         _heap_ids: &mut AHashSet<HeapId>,
-        _interns: &Interns,
     ) -> std::fmt::Result {
         bytes_repr_fmt(&self.0, f)
     }
